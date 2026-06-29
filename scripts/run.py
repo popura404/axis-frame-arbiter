@@ -33,16 +33,23 @@ def run(command, log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("suite", choices=["fifo"])
+    parser.add_argument("suite", choices=["fifo", "directed"])
+    parser.add_argument("--mode", type=int, choices=[0, 1], help="default: both policies")
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
-    top = "tb_" + args.suite
+    top = "tb_fifo" if args.suite == "fifo" else "tb_stream_arbiter"
     output = f"build/sim/{top}.vvp"
+    rtl = ["rtl/sync_fifo.sv", "rtl/stream_fifo.sv"]
+    if args.suite != "fifo":
+        rtl += ["rtl/frame_arbiter.sv", "rtl/stream_arbiter.sv"]
     run([tool("iverilog"), "-g2012", "-Wall", "-s", top, "-o", output,
-         "rtl/sync_fifo.sv", "rtl/stream_fifo.sv", "sim/tb_fifo.sv"], BUILD / f"{top}-compile.log")
-    transcript = run([tool("vvp"), output], BUILD / f"{top}.log")
-    if "PASS " not in transcript:
-        raise SystemExit("Simulation exited without PASS")
+         *rtl, f"sim/{top}.sv"], BUILD / f"{top}-compile.log")
+    modes = [args.mode] if args.mode is not None else [0, 1]
+    for mode in ([0] if args.suite == "fifo" else modes):
+        transcript = run([tool("vvp"), output, f"+CASE={args.suite}", f"+MODE={mode}"],
+                         BUILD / f"{args.suite}-{mode}.log")
+        if "PASS " not in transcript:
+            raise SystemExit("Simulation exited without PASS")
 
 
 if __name__ == "__main__":
