@@ -51,7 +51,7 @@ def summarize_waits(path):
 
 
 def main():
-    cases = ["fifo", "directed", "random", "negative", "single", "saturated", "skew", "sparse"]
+    cases = ["fifo", "directed", "random", "negative", "single", "saturated", "skew", "sparse", "selftest"]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=cases + ["perf", "all"])
     parser.add_argument("--mode", type=int, choices=[0, 1], help="default: both policies")
@@ -59,29 +59,31 @@ def main():
     parser.add_argument("--events", action="store_true", help="write handshake CSV (including frame waits)")
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
-    selected = cases if args.suite == "all" else cases[4:] if args.suite == "perf" else [args.suite]
+    selected = cases if args.suite == "all" else cases[4:8] if args.suite == "perf" else [args.suite]
     modes = [args.mode] if args.mode is not None else [0, 1]
     compiled = set()
     for case in selected:
-        top = "tb_fifo" if case == "fifo" else "tb_stream_arbiter"
+        top = "tb_fifo" if case == "fifo" else "tb_stream_selftest" if case == "selftest" else "tb_stream_arbiter"
         output = f"build/sim/{top}.vvp"
         if top not in compiled:
             rtl = ["rtl/sync_fifo.sv", "rtl/stream_fifo.sv"]
             if case != "fifo":
                 rtl += ["rtl/frame_arbiter.sv", "rtl/stream_arbiter.sv"]
+            if case == "selftest":
+                rtl += ["rtl/traffic_source.sv", "rtl/sink_checker.sv", "rtl/stream_selftest.sv"]
             run([tool("iverilog"), "-g2012", "-Wall", "-s", top, "-o", output,
                  *rtl, f"sim/{top}.sv"], BUILD / f"{top}-compile.log")
             compiled.add(top)
-        for mode in ([0] if case == "fifo" else modes):
+        for mode in ([0] if case in ("fifo", "selftest") else modes):
             for seed in ((args.seed or [1, 20261026]) if case == "random" else [1]):
                 tag = f"{case}-{mode}" + (f"-seed{seed}" if case == "random" else "")
                 command = [tool("vvp"), output, f"+CASE={case}", f"+MODE={mode}", f"+SEED={seed}"]
-                if args.events and case != "fifo":
+                if args.events and case not in ("fifo", "selftest"):
                     command.append(f"+EVENTS=build/sim/{tag}.csv")
                 transcript = run(command, BUILD / f"{tag}.log")
                 if "PASS " not in transcript:
                     raise SystemExit("Simulation exited without PASS")
-                if args.events and case in cases[4:]:
+                if args.events and case in cases[4:8]:
                     summarize_waits(BUILD / f"{tag}.csv")
 
 
