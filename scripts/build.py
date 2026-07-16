@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run reproducible Vivado OOC implementation, with logs confined to build/."""
+"""Implement a routed same-clock context, or diagnose bare OOC ports."""
 import argparse
 import os
 from pathlib import Path
@@ -27,6 +27,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("top", nargs="?", default="stream_arbiter",
                         choices=["stream_arbiter", "stream_selftest"])
+    parser.add_argument("--context", default="registered", choices=["registered", "ports"],
+                        help="registered: physical same-clock boundary; ports: original abstract I/O diagnostic")
     args = parser.parse_args()
     executable = os.environ.get("VIVADO") or shutil.which("vivado") or shutil.which("vivado.bat")
     if not executable:
@@ -38,14 +40,14 @@ def main():
     if not executable:
         raise SystemExit("Set VIVADO to vivado or vivado.bat, or put it on PATH")
     script = ROOT / "scripts" / "vivado.tcl"
-    output = ROOT / "build" / "vivado" / args.top
+    output = ROOT / "build" / "vivado" / args.top / args.context
     output.mkdir(parents=True, exist_ok=True)
     if Path(executable).suffix.lower() in (".bat", ".cmd"):
         # Invoke a generated batch file by its plain name. Embedding quotes in
         # cmd.exe arguments is unreliable across WSL's Windows argument bridge.
         exe = windows_path(executable) if str(executable).startswith("/") else executable
         arguments = [exe, "-mode", "batch", "-notrace", "-source", windows_path(script),
-                     "-tclargs", args.top]
+                     "-tclargs", args.top, args.context]
         if any(any(c in arg for c in '\r\n"') for arg in arguments):
             raise SystemExit("Invalid quote or newline in Vivado/script path")
         quoted = " ".join('"' + arg.replace("%", "%%") + '"' for arg in arguments)
@@ -56,10 +58,10 @@ def main():
         command = [cmd, "/d", "/v:off", "/c", "launch.cmd"]
     else:
         command = [executable, "-mode", "batch", "-notrace", "-source", str(script),
-                   "-tclargs", args.top]
+                   "-tclargs", args.top, args.context]
     # A previous build must never masquerade as this invocation's result.
     (output / "result.txt").unlink(missing_ok=True)
-    print(f"Implementing {args.top}; reports: {output}", flush=True)
+    print(f"Implementing {args.top} ({args.context}); reports: {output}", flush=True)
     with (output / "launcher.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, cwd=output, text=True, encoding="utf-8", errors="replace",
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
