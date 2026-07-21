@@ -1,5 +1,6 @@
 `timescale 1ns/1ps
-// Stop at a frame boundary, including an already offered but stalled first beat.
+// 每帧产生 16 拍，载荷由源号、帧号、拍号组成。
+// run 拉低后仍完成已呈现的帧；阻塞中的首拍也不能撤销。
 module traffic_source #(
     parameter [1:0] SOURCE_ID = 2'd0
 ) (
@@ -23,8 +24,9 @@ module traffic_source #(
             beat_number <= 0;
             valid <= 0;
         end else if (!valid) begin
-            if (run)
+            if (run) begin
                 valid <= 1;
+            end
         end else if (ready) begin
             if (last) begin
                 frame_number <= frame_number + 1'b1;

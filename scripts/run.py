@@ -61,16 +61,13 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     selected = cases if args.suite == "all" else cases[4:8] if args.suite == "perf" else [args.suite]
     modes = [args.mode] if args.mode is not None else [0, 1]
+    # Match Vivado's rtl/*.sv source discovery; -s elaborates only the chosen top.
+    rtl = [path.relative_to(ROOT).as_posix() for path in sorted((ROOT / "rtl").glob("*.sv"))]
     compiled = set()
     for case in selected:
         top = "tb_fifo" if case == "fifo" else "tb_stream_selftest" if case == "selftest" else "tb_stream_arbiter"
         output = f"build/sim/{top}.vvp"
         if top not in compiled:
-            rtl = ["rtl/sync_fifo.sv", "rtl/stream_fifo.sv"]
-            if case != "fifo":
-                rtl += ["rtl/frame_arbiter.sv", "rtl/stream_arbiter.sv"]
-            if case == "selftest":
-                rtl += ["rtl/traffic_source.sv", "rtl/sink_checker.sv", "rtl/stream_selftest.sv"]
             run([tool("iverilog"), "-g2012", "-Wall", "-s", top, "-o", output,
                  *rtl, f"sim/{top}.sv"], BUILD / f"{top}-compile.log")
             compiled.add(top)
