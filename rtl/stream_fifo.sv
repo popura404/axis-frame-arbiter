@@ -15,21 +15,23 @@ module stream_fifo (
     input  wire        m_ready,
 
     output wire [6:0]  level,
+    output wire        next_valid,
     output wire        protocol_error
 );
     sync_fifo #(
         .WIDTH (33),
         .DEPTH (64)
     ) fifo (
-        .clk     (clk),
-        .rst     (rst),
-        .s_data  ({s_last, s_data}),
-        .s_valid (s_valid),
-        .s_ready (s_ready),
-        .m_data  ({m_last, m_data}),
-        .m_valid (m_valid),
-        .m_ready (m_ready),
-        .level   (level)
+        .clk        (clk),
+        .rst        (rst),
+        .s_data     ({s_last, s_data}),
+        .s_valid    (s_valid),
+        .s_ready    (s_ready),
+        .m_data     ({m_last, m_data}),
+        .m_valid    (m_valid),
+        .m_ready    (m_ready),
+        .level      (level),
+        .next_valid (next_valid)
     );
 
     stream_protocol_checker protocol_monitor (

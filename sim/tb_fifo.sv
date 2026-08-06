@@ -3,7 +3,7 @@ module tb_fifo;
     reg clk=0; always #5 clk=~clk;
     reg rst=1, s_valid=0, m_ready=0;
     reg [32:0] s_data=0;
-    wire s_ready, m_valid; wire [32:0] m_data; wire [6:0] level;
+    wire s_ready, m_valid, next_valid; wire [32:0] m_data; wire [6:0] level;
     sync_fifo dut(.*);
     reg [32:0] queue[0:4095];
     integer head=0,tail=0,checks=0;
@@ -22,6 +22,7 @@ module tb_fifo;
                 held_valid=m_valid&&!m_ready; held=m_data;
                 if (m_valid&&m_ready) begin head=head+1;checks=checks+1;end
                 if (s_valid&&s_ready) begin queue[tail]=s_data;tail=tail+1;end
+                if (next_valid !== (tail!=head)) $fatal(1,"next occupancy mismatch");
             end
             #1;
         end

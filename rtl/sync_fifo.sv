@@ -14,7 +14,8 @@ module sync_fifo #(
     output wire [WIDTH-1:0] m_data,
     output wire             m_valid,
     input  wire             m_ready,
-    output reg  [AW:0]      level
+    output reg  [AW:0]      level,
+    output wire             next_valid
 );
     (* ram_style = "distributed" *) reg [WIDTH-1:0] mem [0:DEPTH-1];
     reg [AW-1:0] wr_ptr;
@@ -25,6 +26,9 @@ module sync_fifo #(
     assign s_ready = !rst && (level < DEPTH);
     assign m_valid = !rst && (level != 0);
     assign m_data = mem[rd_ptr];
+    // 供帧尾重授权使用：包含本沿成功写入，排除弹出的唯一队头。
+    // 不改变当前拍 m_valid 或满时反压规则。
+    assign next_valid = !rst && ((level > 1) || ((level == 1) && !pop) || push);
 
     // 只有握手成功才移动指针，同时读写时占用量不变。
     always @(posedge clk) begin

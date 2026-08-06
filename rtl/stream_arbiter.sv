@@ -23,6 +23,7 @@ module stream_arbiter (
     wire [127:0] head_data;
     wire [3:0] head_last;
     wire [3:0] head_valid;
+    wire [3:0] head_valid_next;
     wire [3:0] head_ready;
     wire grant_active;
     wire frame_done;
@@ -43,20 +44,22 @@ module stream_arbiter (
                 .m_valid        (head_valid[lane]),
                 .m_ready        (head_ready[lane]),
                 .level          (fifo_level[lane*7 +: 7]),
+                .next_valid     (head_valid_next[lane]),
                 .protocol_error (protocol_error[lane])
             );
         end
     endgenerate
 
-    // 2. 根据非空状态选择一路，授权保持到该帧末拍成功传输。
+    // 2. 根据非空状态选择一路；帧尾按出入队后的状态直接交接授权。
     frame_arbiter scheduler (
-        .clk        (clk),
-        .rst        (rst),
-        .mode_rr    (mode_rr),
-        .available  (head_valid),
-        .frame_done (frame_done),
-        .active     (grant_active),
-        .source     (m_source)
+        .clk            (clk),
+        .rst            (rst),
+        .mode_rr        (mode_rr),
+        .available      (head_valid),
+        .available_next (head_valid_next),
+        .frame_done     (frame_done),
+        .active         (grant_active),
+        .source         (m_source)
     );
 
     // 3. 输出被授权 FIFO 的队首，只向该路返回 ready。

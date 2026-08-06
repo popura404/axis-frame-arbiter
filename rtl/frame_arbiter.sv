@@ -5,6 +5,7 @@ module frame_arbiter (
     input  wire       rst,
     input  wire       mode_rr,
     input  wire [3:0] available,
+    input  wire [3:0] available_next,
     input  wire       frame_done,
     output reg        active,
     output reg  [1:0] source
@@ -14,38 +15,42 @@ module frame_arbiter (
     reg found;
     reg [1:0] candidate;
     reg [1:0] index;
+    reg [1:0] start;
     integer offset;
 
-    // 固定模式从 0 开始找；轮询从 cursor 开始，跳过空源。
+    // 固定模式从 0 开始找；轮询在帧尾从当前源的下一路开始。
+    // 帧尾使用本沿出入队后的可用性，空闲时仍使用当前非空状态。
     // index 为 2 位，赋值时自然对 4 取模。
     always @* begin
         found = 0;
         candidate = 0;
         index = 0;
+        start = frame_done ? (source + 2'd1) : cursor;
         for (offset = 0; offset < 4; offset = offset + 1) begin
-            index = rr ? (cursor + offset) : offset;
-            if (!found && available[index]) begin
+            index = rr ? (start + offset) : offset;
+            if (!found && (frame_done ? available_next[index] : available[index])) begin
                 found = 1;
                 candidate = index;
             end
         end
     end
 
-    // 只有空闲时接受候选；帧尾传输后释放，保留一拍仲裁空隙。
+    // 帧尾成功传输的同一边沿直接锁定下一授权，连续积压时无帧间空隙。
+    // 帧尾阻塞或帧中断供时不重选，保持源号及有效输出稳定。
     always @(posedge clk) begin
         if (rst) begin
             rr <= mode_rr;
             cursor <= 0;
             active <= 0;
             source <= 0;
-        end else if (!active) begin
-            if (found) begin
-                source <= candidate;
-                active <= 1;
+        end else begin
+            if (!active || frame_done) begin
+                active <= found;
+                if (found)
+                    source <= candidate;
             end
-        end else if (frame_done) begin
-            active <= 0;
-            cursor <= source + 2'd1;
+            if (frame_done)
+                cursor <= source + 2'd1;
         end
     end
 endmodule

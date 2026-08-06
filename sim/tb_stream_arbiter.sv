@@ -52,6 +52,7 @@ module tb_stream_arbiter;
     // Called on the sampling edge, before nonblocking DUT state updates.
     task automatic sample;
         integer i, candidate, offset, src, wait_time;
+        reg tail_transfer;
         begin
             cycle = cycle + 1;
             if (rst) begin
@@ -127,6 +128,7 @@ module tb_stream_arbiter;
                 end
 
                 // Output first: a synchronous empty FIFO cannot consume this edge's input.
+                tail_transfer = m_valid && m_ready && m_last;
                 if (m_valid && m_ready) begin
                     src = m_source;
                     check(queued[src] > 0, "output has no accepted input");
@@ -177,6 +179,20 @@ module tb_stream_arbiter;
                         issued[i] = issued[i] + 1;
                         accepted = accepted + 1;
                     end
+
+                // At a completed frame boundary, the next grant uses accepted
+                // transactions AFTER both this edge's read and writes. A sole
+                // tail cannot regrant its now-empty source; a newly accepted
+                // first beat may immediately compete. Idle selection above
+                // deliberately retains the existing registered startup cycle.
+                if (tail_transfer) begin
+                    candidate = -1;
+                    for (offset = 0; offset < 4; offset = offset + 1) begin
+                        i = mode ? ((ref_cursor + offset) % 4) : offset;
+                        if (candidate < 0 && queued[i] != 0) candidate = i;
+                    end
+                    ref_grant = candidate;
+                end
             end
         end
     endtask
@@ -262,6 +278,47 @@ module tb_stream_arbiter;
             drain();
             check(frames[2] == 3, "single source frame count");
 
+            // Reading the only tail must leave the arbiter idle, not lock an
+            // empty source and block a later competitor.
+            reset_epoch();
+            limit[0] = 16;
+            cycles(16);
+            m_ready = 1;
+            cycles(15);
+            check(m_valid && m_last && queued[0] == 1, "sole-tail setup failed");
+            cycles(1);
+            check(!m_valid && queued[0] == 0, "sole tail did not drain to empty");
+            limit[3] = 16;
+            drain();
+
+            // The first beat of the next frame arrives on the same edge as
+            // this source's only buffered tail leaves: no empty-cycle bubble.
+            reset_epoch();
+            limit[0] = 16;
+            cycles(16);
+            m_ready = 1;
+            cycles(15);
+            limit[0] = 32;
+            cycles(1);
+            check(m_valid && !m_last && m_source == 0 && m_data == payload(0, 16),
+                  "same-source tail/refill inserted a bubble or lost the new head");
+            drain();
+
+            // An empty competitor becomes eligible on the tail handshake.
+            // Source 3 -> 0 also covers round-robin wrap at this boundary.
+            reset_epoch();
+            limit[3] = 16;
+            cycles(16);
+            m_ready = 1;
+            cycles(15);
+            check(m_valid && m_last && queued[3] == 1 && queued[0] == 0,
+                  "new-competitor boundary setup failed");
+            limit[0] = 16;
+            cycles(1);
+            check(m_valid && !m_last && m_source == 0 && m_data == payload(0, 0),
+                  "same-edge competitor was not granted without a bubble");
+            drain();
+
             // Every FIFO fills, with a stable pending 65th beat until reads resume.
             reset_epoch();
             for (i = 0; i < 4; i = i + 1) limit[i] = 80;
@@ -308,6 +365,10 @@ module tb_stream_arbiter;
             m_ready = 0;
             cycles(9);
             check(m_valid && m_last, "tail not retained under backpressure");
+            m_ready = 1;
+            cycles(1);
+            check(m_valid && !m_last && m_source == (mode ? 2 : 1),
+                  "stalled tail did not hand over to the next frame without a bubble");
             drain();
             check(source_gaps >= 20 && tail_stalls >= 9 && full_cycles > 0, "directed coverage missing");
         end
@@ -430,10 +491,13 @@ module tb_stream_arbiter;
                 if (win_frames[i] < min_frames) min_frames = win_frames[i];
                 if (win_frames[i] > max_frames) max_frames = win_frames[i];
             end
+            if (test_case != "skew") begin
+                check(win_beats == 3400 && win_gaps == 0 && total_frames == 212,
+                      "continuous load did not sustain one beat per cycle");
+            end
             if (test_case == "saturated") begin
-                check(win_beats == 3200 && win_gaps == 200, "saturated throughput differs from 16/17 baseline");
                 if (mode) check(max_frames-min_frames <= 1, "round-robin saturated fairness failed");
-                else check(win_frames[0] == 200 && win_frames[1]+win_frames[2]+win_frames[3] == 0,
+                else check(win_frames[0] == 212 && win_frames[1]+win_frames[2]+win_frames[3] == 0,
                            "fixed-priority saturation should starve lower priority sources");
             end
             // Stop releasing frames, then drain all released traffic, including backlog.
