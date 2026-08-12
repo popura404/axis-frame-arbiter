@@ -1,10 +1,12 @@
 `timescale 1ns/1ps
 // 检查每 16 拍的 LAST，以及背压期间 VALID/DATA/LAST 是否保持。
 // 错误保持到复位，只报告，不丢弃或修复输入数据。
-module stream_protocol_checker (
+module stream_protocol_checker #(
+    parameter integer DATA_WIDTH = 32
+) (
     input  wire        clk,
     input  wire        rst,
-    input  wire [31:0] data,
+    input  wire [DATA_WIDTH-1:0] data,
     input  wire        last,
     input  wire        valid,
     input  wire        ready,
@@ -12,7 +14,7 @@ module stream_protocol_checker (
 );
     reg [3:0] beat;
     reg stalled;
-    reg [32:0] held;
+    reg [DATA_WIDTH:0] held;
 
     always @(posedge clk) begin
         if (rst) begin

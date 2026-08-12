@@ -1,35 +1,60 @@
 `timescale 1ns/1ps
 
 // One driver and one independent accepted-transaction scoreboard. No DUT internals.
-module tb_stream_arbiter;
+module tb_stream_arbiter #(
+    parameter integer PORTS = 4,
+    parameter integer DATA_WIDTH = 32,
+    parameter integer FIFO_DEPTH = 64,
+    parameter integer AXIS = 0
+);
+    localparam SOURCE_WIDTH = $clog2(PORTS);
+    localparam LEVEL_WIDTH = $clog2(FIFO_DEPTH) + 1;
+    localparam [LEVEL_WIDTH-1:0] FULL_LEVEL = FIFO_DEPTH;
     reg clk = 0;
     always #5 clk = ~clk;
     reg rst = 1;
     reg mode_rr = 0;
-    reg [127:0] s_data = 0;
-    reg [3:0] s_last = 0, s_valid = 0;
-    wire [3:0] s_ready, protocol_error;
-    wire [27:0] fifo_level;
-    wire [31:0] m_data;
+    reg [PORTS*DATA_WIDTH-1:0] s_data = 0;
+    reg [PORTS-1:0] s_last = 0, s_valid = 0;
+    wire [PORTS-1:0] s_ready, protocol_error;
+    wire [PORTS*LEVEL_WIDTH-1:0] fifo_level;
+    wire [DATA_WIDTH-1:0] m_data;
     wire m_last, m_valid;
     reg m_ready = 0;
-    wire [1:0] m_source;
+    wire [SOURCE_WIDTH-1:0] m_source;
 
-    stream_arbiter dut (.*);
+    generate
+        if (AXIS) begin : axi_interface
+            axis_stream_arbiter #(
+                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH)
+            ) dut (
+                .aclk(clk), .aresetn(!rst), .mode_rr(mode_rr),
+                .s_axis_tdata(s_data), .s_axis_tlast(s_last),
+                .s_axis_tvalid(s_valid), .s_axis_tready(s_ready),
+                .m_axis_tdata(m_data), .m_axis_tlast(m_last),
+                .m_axis_tvalid(m_valid), .m_axis_tready(m_ready),
+                .m_axis_tid(m_source), .protocol_error(protocol_error), .fifo_level(fifo_level)
+            );
+        end else begin : core_interface
+            stream_arbiter #(
+                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH)
+            ) dut (.*);
+        end
+    endgenerate
 
-    localparam QSIZE = 256;
-    reg [32:0] queue_data [0:3][0:QSIZE-1];
-    integer head [0:3], tail [0:3], queued [0:3];
-    integer issued [0:3], limit [0:3], frames [0:3];
+    localparam QSIZE = FIFO_DEPTH + 1;
+    reg [DATA_WIDTH:0] queue_data [0:PORTS-1][0:QSIZE-1];
+    integer head [0:PORTS-1], tail [0:PORTS-1], queued [0:PORTS-1];
+    integer issued [0:PORTS-1], limit [0:PORTS-1], frames [0:PORTS-1];
     integer accepted, delivered, discarded = 0, grand_delivered = 0, grand_accepted = 0;
-    integer frame_time [0:3][0:4095];
-    integer in_frames [0:3], out_started [0:3];
-    integer win_frames [0:3], win_backpressure [0:3], win_full [0:3], peak [0:3];
-    integer wait_count [0:3], wait_sum [0:3], wait_max [0:3];
+    integer frame_time [0:PORTS-1][0:4095];
+    integer in_frames [0:PORTS-1], out_started [0:PORTS-1];
+    integer win_frames [0:PORTS-1], win_backpressure [0:PORTS-1], win_full [0:PORTS-1], peak [0:PORTS-1];
+    integer wait_count [0:PORTS-1], wait_sum [0:PORTS-1], wait_max [0:PORTS-1];
     integer win_cycles = 0, win_beats = 0, win_gaps = 0, win_source_gaps = 0, win_stalls = 0;
     reg measuring = 0, expected_error = 0;
-    reg [3:0] input_stalled = 0, issue_mask = 4'hf;
-    reg [32:0] input_held [0:3];
+    reg [PORTS-1:0] input_stalled = 0, issue_mask = {PORTS{1'b1}};
+    reg [DATA_WIDTH:0] input_held [0:PORTS-1];
     integer violation_count = 0, seed = 1, events = 0;
     reg [31:0] rng = 1;
     string event_path;
@@ -37,11 +62,17 @@ module tb_stream_arbiter;
     integer mode = 0, tests = 0, source_gaps = 0, stall_cycles = 0;
     integer full_cycles = 0, tail_stalls = 0;
     reg stalled = 0;
-    reg [34:0] stalled_payload;
+    reg [DATA_WIDTH+SOURCE_WIDTH:0] stalled_payload;
     string test_case = "directed";
 
-    function automatic [31:0] payload(input integer src, input integer index);
-        payload = (src << 30) | index;
+    function automatic [DATA_WIDTH-1:0] payload(input integer src, input integer index);
+        integer word_index;
+        begin
+            // Every 32-bit chunk varies; a 64-bit truncation cannot pass unnoticed.
+            for (word_index = 0; word_index < DATA_WIDTH/32; word_index = word_index + 1)
+                payload[word_index*32 +: 32] = index ^ (32'h9e3779b9 * word_index);
+            payload[DATA_WIDTH-1 -: SOURCE_WIDTH] = src;
+        end
     endfunction
 
     task automatic check(input bit condition, input string message);
@@ -56,7 +87,7 @@ module tb_stream_arbiter;
         begin
             cycle = cycle + 1;
             if (rst) begin
-                for (i = 0; i < 4; i = i + 1) begin
+                for (i = 0; i < PORTS; i = i + 1) begin
                     discarded = discarded + queued[i];
                     head[i] = 0;
                     tail[i] = 0;
@@ -74,20 +105,20 @@ module tb_stream_arbiter;
                 stalled = 0;
                 input_stalled = 0;
             end else begin
-                if (!expected_error) check(protocol_error === 4'b0, "unexpected input protocol error");
+                if (!expected_error) check(protocol_error === {PORTS{1'b0}}, "unexpected input protocol error");
                 if (measuring) win_cycles = win_cycles + 1;
-                for (i = 0; i < 4; i = i + 1) begin
-                    if (input_stalled[i] && (!s_valid[i] || {s_last[i], s_data[i*32 +: 32]} !== input_held[i])) begin
+                for (i = 0; i < PORTS; i = i + 1) begin
+                    if (input_stalled[i] && (!s_valid[i] || {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]} !== input_held[i])) begin
                         violation_count = violation_count + 1;
                         check(expected_error, "source violated ready/valid protocol");
                     end
                     input_stalled[i] = s_valid[i] && !s_ready[i];
-                    input_held[i] = {s_last[i], s_data[i*32 +: 32]};
+                    input_held[i] = {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]};
                     if (measuring) begin
                         if (test_case == "saturated")
                             check(queued[i] > 0, "saturated fairness requires every source continuously nonempty");
                         if (input_stalled[i]) win_backpressure[i] = win_backpressure[i] + 1;
-                        if (queued[i] == 64) win_full[i] = win_full[i] + 1;
+                        if (queued[i] == FIFO_DEPTH) win_full[i] = win_full[i] + 1;
                         if (queued[i] > peak[i]) peak[i] = queued[i];
                     end
                 end
@@ -107,8 +138,8 @@ module tb_stream_arbiter;
                     if (measuring) win_gaps = win_gaps + 1;
                     check(!m_valid, "output presented before grant was registered");
                     // This set is independent of the DUT's FIFO flags or grant state.
-                    for (offset = 0; offset < 4; offset = offset + 1) begin
-                        i = mode ? ((ref_cursor + offset) % 4) : offset;
+                    for (offset = 0; offset < PORTS; offset = offset + 1) begin
+                        i = mode ? ((ref_cursor + offset) % PORTS) : offset;
                         if (candidate < 0 && queued[i] != 0) candidate = i;
                     end
                 end else begin
@@ -122,9 +153,9 @@ module tb_stream_arbiter;
                     end
                 end
 
-                for (i = 0; i < 4; i = i + 1) begin
-                    check(fifo_level[i*7 +: 7] == queued[i], "FIFO level differs from accepted transactions");
-                    if (queued[i] == 64) full_cycles = full_cycles + 1;
+                for (i = 0; i < PORTS; i = i + 1) begin
+                    check(fifo_level[i*LEVEL_WIDTH +: LEVEL_WIDTH] == queued[i], "FIFO level differs from accepted transactions");
+                    if (queued[i] == FIFO_DEPTH) full_cycles = full_cycles + 1;
                 end
 
                 // Output first: a synchronous empty FIFO cannot consume this edge's input.
@@ -133,7 +164,7 @@ module tb_stream_arbiter;
                     src = m_source;
                     check(queued[src] > 0, "output has no accepted input");
                     check({m_last, m_data} === queue_data[src][head[src]], "data/LAST mismatch or source reordering");
-                    check(m_data[31:30] == src, "payload source identifier mismatch");
+                    check(m_data[DATA_WIDTH-1 -: SOURCE_WIDTH] == src, "payload source identifier mismatch");
                     if (!expected_error) begin
                         check(m_data[3:0] == frame_beat, "output frame interleaved or beat order wrong");
                         check(m_last == (frame_beat == 15), "output frame length/LAST wrong");
@@ -157,23 +188,23 @@ module tb_stream_arbiter;
                     if (m_last) begin
                         frames[src] = frames[src] + 1;
                         if (measuring) win_frames[src] = win_frames[src] + 1;
-                        ref_cursor = (src + 1) % 4;
+                        ref_cursor = (src + 1) % PORTS;
                         ref_grant = -1;
                         frame_beat = 0;
                     end else frame_beat = frame_beat + 1;
                 end
                 if (candidate >= 0) ref_grant = candidate;
 
-                for (i = 0; i < 4; i = i + 1)
+                for (i = 0; i < PORTS; i = i + 1)
                     if (s_valid[i] && s_ready[i]) begin
-                        check(queued[i] < 64, "FIFO accepted beyond capacity");
+                        check(queued[i] < FIFO_DEPTH, "FIFO accepted beyond capacity");
                         if ((issued[i] % 16) == 0) begin
                             frame_time[i][in_frames[i] % 4096] = cycle;
                             in_frames[i] = in_frames[i] + 1;
                         end
-                        if (events) $fdisplay(events, "%0d,IN,%0d,%08x,%0d,%0d", cycle, i, s_data[i*32 +: 32], s_last[i], measuring);
+                        if (events) $fdisplay(events, "%0d,IN,%0d,%08x,%0d,%0d", cycle, i, s_data[i*DATA_WIDTH +: DATA_WIDTH], s_last[i], measuring);
                         grand_accepted = grand_accepted + 1;
-                        queue_data[i][tail[i]] = {s_last[i], s_data[i*32 +: 32]};
+                        queue_data[i][tail[i]] = {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]};
                         tail[i] = (tail[i] + 1) % QSIZE;
                         queued[i] = queued[i] + 1;
                         issued[i] = issued[i] + 1;
@@ -187,8 +218,8 @@ module tb_stream_arbiter;
                 // deliberately retains the existing registered startup cycle.
                 if (tail_transfer) begin
                     candidate = -1;
-                    for (offset = 0; offset < 4; offset = offset + 1) begin
-                        i = mode ? ((ref_cursor + offset) % 4) : offset;
+                    for (offset = 0; offset < PORTS; offset = offset + 1) begin
+                        i = mode ? ((ref_cursor + offset) % PORTS) : offset;
                         if (candidate < 0 && queued[i] != 0) candidate = i;
                     end
                     ref_grant = candidate;
@@ -209,9 +240,9 @@ module tb_stream_arbiter;
     task automatic drive;
         integer i;
         begin
-            for (i = 0; i < 4; i = i + 1) begin
+            for (i = 0; i < PORTS; i = i + 1) begin
                 s_valid[i] = (issued[i] < limit[i]) && (issue_mask[i] || input_stalled[i]);
-                s_data[i*32 +: 32] = payload(i, issued[i]);
+                s_data[i*DATA_WIDTH +: DATA_WIDTH] = payload(i, issued[i]);
                 s_last[i] = (issued[i] % 16) == 15;
             end
         end
@@ -231,7 +262,7 @@ module tb_stream_arbiter;
         integer i;
         begin
             input_done = 1;
-            for (i = 0; i < 4; i = i + 1)
+            for (i = 0; i < PORTS; i = i + 1)
                 if (issued[i] != limit[i]) input_done = 0;
         end
     endfunction
@@ -241,14 +272,14 @@ module tb_stream_arbiter;
         begin
             rst = 1;
             expected_error = 0;
-            issue_mask = 4'hf;
+            issue_mask = {PORTS{1'b1}};
             mode_rr = mode;
             s_valid = 0;
             m_ready = 0;
-            for (i = 0; i < 4; i = i + 1) limit[i] = 0;
+            for (i = 0; i < PORTS; i = i + 1) limit[i] = 0;
             tick();
             tick();
-            check(!m_valid && protocol_error == 0 && fifo_level == 0, "reset failed to clear state");
+            check(!m_valid && s_ready == 0 && protocol_error == 0 && fifo_level == 0, "reset failed to clear state");
             rst = 0;
             tests = tests + 1;
         end
@@ -262,7 +293,7 @@ module tb_stream_arbiter;
             while (!input_done() || accepted != delivered) begin
                 cycles(1);
                 watchdog = watchdog + 1;
-                check(watchdog < 20000, "drain timeout (lost data or retained grant)");
+                check(watchdog < PORTS*8192, "drain timeout (lost data or retained grant)");
             end
             cycles(3);
             check(frame_beat == 0 && !m_valid, "drain ended in an incomplete frame");
@@ -274,9 +305,9 @@ module tb_stream_arbiter;
         integer i, n;
         begin
             reset_epoch();
-            limit[2] = 48;
+            limit[PORTS-1] = 48;
             drain();
-            check(frames[2] == 3, "single source frame count");
+            check(frames[PORTS-1] == 3, "single source frame count");
 
             // Reading the only tail must leave the arbiter idle, not lock an
             // empty source and block a later competitor.
@@ -288,7 +319,7 @@ module tb_stream_arbiter;
             check(m_valid && m_last && queued[0] == 1, "sole-tail setup failed");
             cycles(1);
             check(!m_valid && queued[0] == 0, "sole tail did not drain to empty");
-            limit[3] = 16;
+            limit[PORTS-1] = 16;
             drain();
 
             // The first beat of the next frame arrives on the same edge as
@@ -305,13 +336,13 @@ module tb_stream_arbiter;
             drain();
 
             // An empty competitor becomes eligible on the tail handshake.
-            // Source 3 -> 0 also covers round-robin wrap at this boundary.
+            // Last source -> 0 also covers round-robin wrap at this boundary.
             reset_epoch();
-            limit[3] = 16;
+            limit[PORTS-1] = 16;
             cycles(16);
             m_ready = 1;
             cycles(15);
-            check(m_valid && m_last && queued[3] == 1 && queued[0] == 0,
+            check(m_valid && m_last && queued[PORTS-1] == 1 && queued[0] == 0,
                   "new-competitor boundary setup failed");
             limit[0] = 16;
             cycles(1);
@@ -319,42 +350,42 @@ module tb_stream_arbiter;
                   "same-edge competitor was not granted without a bubble");
             drain();
 
-            // Every FIFO fills, with a stable pending 65th beat until reads resume.
+            // Every FIFO fills, with one stable pending beat until reads resume.
             reset_epoch();
-            for (i = 0; i < 4; i = i + 1) limit[i] = 80;
-            cycles(90);
-            check(fifo_level == {4{7'd64}} && s_ready == 0, "all-full backpressure not reached");
+            for (i = 0; i < PORTS; i = i + 1) limit[i] = FIFO_DEPTH + 16;
+            cycles(FIFO_DEPTH + 10);
+            check(fifo_level == {PORTS{FULL_LEVEL}} && s_ready == 0, "all-full backpressure not reached");
             // Configuration is captured by reset and must not change at run time.
             mode_rr = !mode;
             drain();
-            for (i = 0; i < 4; i = i + 1) check(frames[i] == 5, "four-source frame count");
+            for (i = 0; i < PORTS; i = i + 1) check(frames[i] == FIFO_DEPTH/16 + 1, "all-source frame count");
 
-            // Empty sources 1/2 must be skipped; winner 3 advances cursor to 0.
+            // Only first/last sources compete; intermediate empty sources are skipped.
             reset_epoch();
             limit[0] = 64;
-            limit[3] = 64;
+            limit[PORTS-1] = 64;
             cycles(70);
             drain();
-            check(frames[0] == 4 && frames[3] == 4, "sparse competition count");
+            check(frames[0] == 4 && frames[PORTS-1] == 4, "sparse competition count");
 
-            // Source 3 owns an incomplete frame. Source 0 cannot steal its grant.
+            // The last source owns an incomplete frame. Source 0 cannot steal its grant.
             reset_epoch();
             m_ready = 1;
-            limit[3] = 5;
+            limit[PORTS-1] = 5;
             cycles(12);
             check(delivered == 5, "frame prefix did not drain");
             limit[0] = 16;
             cycles(25);
             check(delivered == 5 && queued[0] == 16, "grant lost while source paused");
-            limit[3] = 16;
+            limit[PORTS-1] = 16;
             drain();
 
             // Explicit first-beat and final-beat stalls, including a queued competitor.
             reset_epoch();
-            limit[1] = 32;
-            limit[2] = 32;
+            limit[0] = 32;
+            limit[PORTS-1] = 32;
             cycles(10);
-            check(m_valid && !m_last, "first-beat stall not reached");
+            check(!m_ready && m_valid && !m_last, "TVALID waited for TREADY or first-beat stall not reached");
             m_ready = 1;
             n = 0;
             while (!(m_valid && m_last)) begin
@@ -367,7 +398,7 @@ module tb_stream_arbiter;
             check(m_valid && m_last, "tail not retained under backpressure");
             m_ready = 1;
             cycles(1);
-            check(m_valid && !m_last && m_source == (mode ? 2 : 1),
+            check(m_valid && !m_last && m_source == (mode ? PORTS-1 : 0),
                   "stalled tail did not hand over to the next frame without a bubble");
             drain();
             check(source_gaps >= 20 && tail_stalls >= 9 && full_cycles > 0, "directed coverage missing");
@@ -391,16 +422,16 @@ module tb_stream_arbiter;
         reg [31:0] r;
         begin
             reset_epoch();
-            for (i = 0; i < 4; i = i + 1) limit[i] = 2048;
+            for (i = 0; i < PORTS; i = i + 1) limit[i] = 2048;
             // The first epoch is deliberately reset while accepted traffic is outstanding.
             for (n = 0; n < 1000; n = n + 1) begin
                 r = random_word();
-                issue_mask = r[3:0];
-                m_ready = r[4] && (n % 197 < 160);
+                issue_mask = r[PORTS-1:0];
+                m_ready = r[8] && (n % 197 < 160);
                 cycles(1);
             end
             while (frame_beat == 0) begin
-                issue_mask = 4'hf;
+                issue_mask = {PORTS{1'b1}};
                 m_ready = 1;
                 cycles(1);
             end
@@ -409,19 +440,19 @@ module tb_stream_arbiter;
             check(frame_beat != 0 && accepted > delivered, "reset coverage requires an active partial frame and outstanding data");
             reset_epoch();
             check(discarded > 0, "reset did not account for discarded input");
-            for (i = 0; i < 4; i = i + 1) limit[i] = 2048;
+            for (i = 0; i < PORTS; i = i + 1) limit[i] = 2048;
             watchdog = 0;
             while (!input_done()) begin
                 r = random_word();
-                issue_mask = r[3:0];
-                m_ready = (r[7:4] < 11) && (watchdog % 251 < 210);
+                issue_mask = r[PORTS-1:0];
+                m_ready = (r[12:9] < 11) && (watchdog % 251 < 210);
                 cycles(1);
                 watchdog = watchdog + 1;
                 check(watchdog < 100000, "random traffic timeout");
             end
-            issue_mask = 4'hf;
+            issue_mask = {PORTS{1'b1}};
             drain();
-            check(accepted == 8192 && delivered == 8192, "random epoch traffic incomplete");
+            check(accepted == PORTS*2048 && delivered == PORTS*2048, "random epoch traffic incomplete");
         end
     endtask
 
@@ -433,7 +464,7 @@ module tb_stream_arbiter;
             win_gaps = 0;
             win_source_gaps = 0;
             win_stalls = 0;
-            for (i = 0; i < 4; i = i + 1) begin
+            for (i = 0; i < PORTS; i = i + 1) begin
                 win_frames[i] = 0;
                 win_backpressure[i] = 0;
                 win_full[i] = 0;
@@ -452,17 +483,18 @@ module tb_stream_arbiter;
             reset_epoch();
             // Same open-loop release schedule and downstream schedule in both modes.
             // Warmup fills each active FIFO; measurement begins at a frame boundary.
-            for (i = 0; i < 4; i = i + 1)
+            for (i = 0; i < PORTS; i = i + 1)
                 if (test_case == "saturated" || test_case == "skew" ||
                     (test_case == "single" && i == 0) ||
-                    (test_case == "sparse" && (i == 0 || i == 3))) limit[i] = 64;
-            cycles(70);
+                    (test_case == "sparse" && (i == 0 || i == PORTS-1))) limit[i] = FIFO_DEPTH;
+            cycles(FIFO_DEPTH + 6);
+            check(m_valid && !m_ready, "prefilled source waited for TREADY before asserting TVALID");
             m_ready = 1;
             measurement_start();
             for (n = 0; n < 3400; n = n + 1) begin
-                for (i = 0; i < 4; i = i + 1) begin
+                for (i = 0; i < PORTS; i = i + 1) begin
                     if ((test_case == "saturated" || (test_case == "single" && i == 0) ||
-                        (test_case == "sparse" && (i == 0 || i == 3))) && n % 16 == 0)
+                        (test_case == "sparse" && (i == 0 || i == PORTS-1))) && n % 16 == 0)
                         limit[i] = limit[i] + 16;
                     if (test_case == "skew" && n % (16 << i) == 0)
                         limit[i] = limit[i] + 16;
@@ -475,14 +507,15 @@ module tb_stream_arbiter;
                   "measurement cycle categories do not partition the window");
             $display("METRIC MODE=%0d CASE=%s cycles=%0d beats=%0d beat_per_cycle=%0.6f MBps_at_100MHz=%0.3f arbitration_idle=%0d source_gaps=%0d downstream_stalls=%0d",
                      mode, test_case, win_cycles, win_beats, 1.0*win_beats/win_cycles,
-                     400.0*win_beats/win_cycles, win_gaps, win_source_gaps, win_stalls);
-            total_frames = win_frames[0] + win_frames[1] + win_frames[2] + win_frames[3];
+                     (100.0*DATA_WIDTH/8)*win_beats/win_cycles, win_gaps, win_source_gaps, win_stalls);
+            total_frames = 0;
+            for (i = 0; i < PORTS; i = i + 1) total_frames = total_frames + win_frames[i];
             min_frames = win_frames[0];
             max_frames = win_frames[0];
-            for (i = 0; i < 4; i = i + 1) begin
+            for (i = 0; i < PORTS; i = i + 1) begin
                 oldest = 0;
                 if (in_frames[i] > out_started[i]) oldest = cycle - frame_time[i][out_started[i] % 4096];
-                // Request and accepted counts include the 64-beat prefill; service/wait statistics use only the window.
+                // Request and accepted counts include the FIFO_DEPTH-beat prefill; service/wait statistics use only the window.
                 $display("SOURCE MODE=%0d CASE=%s src=%0d completed=%0d share_percent=%0.3f wait_samples=%0d wait_avg=%0.3f wait_max=%0d offered_frames=%0d accepted_beats=%0d queued_beats=%0d unfinished_frames=%0d oldest_unserved=%0d input_blocked=%0d full_cycles=%0d peak=%0d",
                          mode, test_case, i, win_frames[i], total_frames ? 100.0*win_frames[i]/total_frames : 0.0, wait_count[i],
                          wait_count[i] ? 1.0*wait_sum[i]/wait_count[i] : 0.0, wait_max[i],
@@ -497,11 +530,11 @@ module tb_stream_arbiter;
             end
             if (test_case == "saturated") begin
                 if (mode) check(max_frames-min_frames <= 1, "round-robin saturated fairness failed");
-                else check(win_frames[0] == 212 && win_frames[1]+win_frames[2]+win_frames[3] == 0,
+                else check(win_frames[0] == 212 && total_frames == win_frames[0],
                            "fixed-priority saturation should starve lower priority sources");
             end
             // Stop releasing frames, then drain all released traffic, including backlog.
-            issue_mask = 4'hf;
+            issue_mask = {PORTS{1'b1}};
             drain();
         end
     endtask
@@ -531,33 +564,34 @@ module tb_stream_arbiter;
 
             reset_epoch();
             expected_error = 1;
-            limit[2] = 17;
+            m_ready = 1;
+            limit[PORTS-1] = 17;
             for (n = 0; n < 17; n = n + 1) begin
                 drive();
-                s_last[2] = n == 16;
+                s_last[PORTS-1] = n == 16;
                 tick();
-                if (n < 15) check(!protocol_error[2], "late-LAST setup failed before beat 16");
-                else check(protocol_error[2], "late LAST was not detected at the missing beat-16 LAST");
+                if (n < 15) check(!protocol_error[PORTS-1], "late-LAST setup failed before beat 16");
+                else check(protocol_error[PORTS-1], "late LAST was not detected at the missing beat-16 LAST");
             end
             $display("EXPECTED_ERROR late_LAST detected");
 
             reset_epoch();
-            limit[2] = 80;
+            limit[PORTS-1] = FIFO_DEPTH + 16;
             cycles(70);
-            check(!s_ready[2] && s_valid[2], "handshake violation setup not stalled");
+            check(!s_ready[PORTS-1] && s_valid[PORTS-1], "handshake violation setup not stalled");
             expected_error = 1;
-            s_data[95:64] = s_data[95:64] ^ 32'h10;
+            s_data[PORTS*DATA_WIDTH-1] = ~s_data[PORTS*DATA_WIDTH-1];
             tick();
-            check(protocol_error[2], "stalled data change was not detected");
+            check(protocol_error[PORTS-1], "stalled data change was not detected");
             $display("EXPECTED_ERROR stalled_DATA_change detected");
 
             reset_epoch();
-            limit[3] = 80;
+            limit[PORTS-1] = FIFO_DEPTH + 16;
             cycles(70);
             expected_error = 1;
-            s_valid[3] = 0;
+            s_valid[PORTS-1] = 0;
             tick();
-            check(protocol_error[3], "stalled VALID drop was not detected");
+            check(protocol_error[PORTS-1], "stalled VALID drop was not detected");
             $display("EXPECTED_ERROR stalled_VALID_drop detected");
             check(violation_count == 2, "independent source monitor did not see both handshake violations");
             // A legal post-reset frame confirms sticky errors clear and traffic recovers.
@@ -568,8 +602,14 @@ module tb_stream_arbiter;
     endtask
 
     integer init_i;
+    // A deadlocked design must fail rather than leave a batch regression hung.
     initial begin
-        for (init_i = 0; init_i < 4; init_i = init_i + 1) begin
+        #2000000;
+        $fatal(1, "global simulation timeout");
+    end
+
+    initial begin
+        for (init_i = 0; init_i < PORTS; init_i = init_i + 1) begin
             queued[init_i] = 0;
             issued[init_i] = 0;
             limit[init_i] = 0;
@@ -591,8 +631,8 @@ module tb_stream_arbiter;
         else $fatal(1, "unknown CASE=%s", test_case);
         check(grand_accepted == grand_delivered + discarded, "lifetime accepted/delivered/discarded mismatch");
         if (events) $fclose(events);
-        $display("PASS stream MODE=%0d CASE=%s epochs=%0d beats=%0d discarded=%0d stalls=%0d tail_stalls=%0d source_gaps=%0d full_cycles=%0d",
-                 mode, test_case, tests, grand_delivered, discarded, stall_cycles, tail_stalls, source_gaps, full_cycles);
+        $display("PASS stream PORTS=%0d WIDTH=%0d DEPTH=%0d AXIS=%0d MODE=%0d CASE=%s epochs=%0d beats=%0d discarded=%0d stalls=%0d tail_stalls=%0d source_gaps=%0d full_cycles=%0d",
+                 PORTS, DATA_WIDTH, FIFO_DEPTH, AXIS, mode, test_case, tests, grand_delivered, discarded, stall_cycles, tail_stalls, source_gaps, full_cycles);
         $finish;
     end
 endmodule

@@ -1,32 +1,35 @@
 `timescale 1ns/1ps
 // 帧级调度：先寄存授权，再允许输出；帧中断供时仍保留授权。
-module frame_arbiter (
+module frame_arbiter #(
+    parameter integer PORTS = 4
+) (
     input  wire       clk,
     input  wire       rst,
     input  wire       mode_rr,
-    input  wire [3:0] available,
-    input  wire [3:0] available_next,
+    input  wire [PORTS-1:0] available,
+    input  wire [PORTS-1:0] available_next,
     input  wire       frame_done,
     output reg        active,
-    output reg  [1:0] source
+    output reg  [$clog2(PORTS)-1:0] source
 );
+    localparam integer SOURCE_WIDTH = $clog2(PORTS);
     reg rr;
-    reg [1:0] cursor;
+    reg [SOURCE_WIDTH-1:0] cursor;
     reg found;
-    reg [1:0] candidate;
-    reg [1:0] index;
-    reg [1:0] start;
+    reg [SOURCE_WIDTH-1:0] candidate;
+    reg [SOURCE_WIDTH-1:0] index;
+    reg [SOURCE_WIDTH-1:0] start;
     integer offset;
 
     // 固定模式从 0 开始找；轮询在帧尾从当前源的下一路开始。
     // 帧尾使用本沿出入队后的可用性，空闲时仍使用当前非空状态。
-    // index 为 2 位，赋值时自然对 4 取模。
+    // 支持的 PORTS 均为 2 的幂，源号位宽截断即对 PORTS 取模。
     always @* begin
         found = 0;
         candidate = 0;
         index = 0;
-        start = frame_done ? (source + 2'd1) : cursor;
-        for (offset = 0; offset < 4; offset = offset + 1) begin
+        start = frame_done ? (source + 1'b1) : cursor;
+        for (offset = 0; offset < PORTS; offset = offset + 1) begin
             index = rr ? (start + offset) : offset;
             if (!found && (frame_done ? available_next[index] : available[index])) begin
                 found = 1;
@@ -50,7 +53,7 @@ module frame_arbiter (
                     source <= candidate;
             end
             if (frame_done)
-                cursor <= source + 2'd1;
+                cursor <= source + 1'b1;
         end
     end
 endmodule

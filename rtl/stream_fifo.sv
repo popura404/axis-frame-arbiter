@@ -1,26 +1,29 @@
 `timescale 1ns/1ps
 // 单路输入封装：将 DATA/LAST 一起缓存，协议监测独立于存储通路。
-module stream_fifo (
+module stream_fifo #(
+    parameter integer DATA_WIDTH = 32,
+    parameter integer FIFO_DEPTH = 64
+) (
     input  wire        clk,
     input  wire        rst,
 
-    input  wire [31:0] s_data,
+    input  wire [DATA_WIDTH-1:0] s_data,
     input  wire        s_last,
     input  wire        s_valid,
     output wire        s_ready,
 
-    output wire [31:0] m_data,
+    output wire [DATA_WIDTH-1:0] m_data,
     output wire        m_last,
     output wire        m_valid,
     input  wire        m_ready,
 
-    output wire [6:0]  level,
+    output wire [$clog2(FIFO_DEPTH):0] level,
     output wire        next_valid,
     output wire        protocol_error
 );
     sync_fifo #(
-        .WIDTH (33),
-        .DEPTH (64)
+        .WIDTH (DATA_WIDTH + 1),
+        .DEPTH (FIFO_DEPTH)
     ) fifo (
         .clk        (clk),
         .rst        (rst),
@@ -34,7 +37,9 @@ module stream_fifo (
         .next_valid (next_valid)
     );
 
-    stream_protocol_checker protocol_monitor (
+    stream_protocol_checker #(
+        .DATA_WIDTH (DATA_WIDTH)
+    ) protocol_monitor (
         .clk            (clk),
         .rst            (rst),
         .data           (s_data),
