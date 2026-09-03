@@ -5,7 +5,8 @@ module tb_stream_arbiter #(
     parameter integer PORTS = 4,
     parameter integer DATA_WIDTH = 32,
     parameter integer FIFO_DEPTH = 64,
-    parameter integer AXIS = 0
+    parameter integer AXIS = 0,
+    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 );
     localparam SOURCE_WIDTH = $clog2(PORTS);
     localparam LEVEL_WIDTH = $clog2(FIFO_DEPTH) + 1;
@@ -26,7 +27,8 @@ module tb_stream_arbiter #(
     generate
         if (AXIS) begin : axi_interface
             axis_stream_arbiter #(
-                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH)
+                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
+                .ADMISSION_LEVELS(ADMISSION_LEVELS)
             ) dut (
                 .aclk(clk), .aresetn(!rst), .mode_rr(mode_rr),
                 .s_axis_tdata(s_data), .s_axis_tlast(s_last),
@@ -37,7 +39,8 @@ module tb_stream_arbiter #(
             );
         end else begin : core_interface
             stream_arbiter #(
-                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH)
+                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
+                .ADMISSION_LEVELS(ADMISSION_LEVELS)
             ) dut (.*);
         end
     endgenerate
@@ -64,6 +67,14 @@ module tb_stream_arbiter #(
     reg stalled = 0;
     reg [DATA_WIDTH+SOURCE_WIDTH:0] stalled_payload;
     string test_case = "directed";
+    integer gap = 1, expect_starve = 0, contract_violations = 0;
+    integer contract_misses [0:PORTS-1];
+    reg [PORTS-1:0] contract_enable = 0;
+    reg allow_contract_violation = 0;
+
+    function automatic integer admission_level(input integer lane);
+        admission_level = ADMISSION_LEVELS[lane*5 +: 5];
+    endfunction
 
     function automatic [DATA_WIDTH-1:0] payload(input integer src, input integer index);
         integer word_index;
@@ -96,6 +107,7 @@ module tb_stream_arbiter #(
                     frames[i] = 0;
                     in_frames[i] = 0;
                     out_started[i] = 0;
+                    contract_misses[i] = 0;
                 end
                 accepted = 0;
                 delivered = 0;
@@ -114,6 +126,17 @@ module tb_stream_arbiter #(
                     end
                     input_stalled[i] = s_valid[i] && !s_ready[i];
                     input_held[i] = {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]};
+                    // Independent ready-opportunity contract monitor. A source
+                    // may violate this deadline while remaining AXIS-correct.
+                    // issued[] counts accepted transactions, never DUT state.
+                    if (s_valid[i] && s_ready[i]) contract_misses[i] = 0;
+                    else if (contract_enable[i] && issued[i] % 16 != 0 && s_ready[i]) begin
+                        contract_misses[i] = contract_misses[i] + 1;
+                        if (contract_misses[i] == gap) begin
+                            contract_violations = contract_violations + 1;
+                            check(allow_contract_violation, "source violated its ready-opportunity contract");
+                        end
+                    end
                     if (measuring) begin
                         if (test_case == "saturated")
                             check(queued[i] > 0, "saturated fairness requires every source continuously nonempty");
@@ -140,7 +163,7 @@ module tb_stream_arbiter #(
                     // This set is independent of the DUT's FIFO flags or grant state.
                     for (offset = 0; offset < PORTS; offset = offset + 1) begin
                         i = mode ? ((ref_cursor + offset) % PORTS) : offset;
-                        if (candidate < 0 && queued[i] != 0) candidate = i;
+                        if (candidate < 0 && queued[i] >= admission_level(i)) candidate = i;
                     end
                 end else begin
                     check(m_valid === (queued[ref_grant] != 0),
@@ -220,7 +243,7 @@ module tb_stream_arbiter #(
                     candidate = -1;
                     for (offset = 0; offset < PORTS; offset = offset + 1) begin
                         i = mode ? ((ref_cursor + offset) % PORTS) : offset;
-                        if (candidate < 0 && queued[i] != 0) candidate = i;
+                        if (candidate < 0 && queued[i] >= admission_level(i)) candidate = i;
                     end
                     ref_grant = candidate;
                 end
@@ -272,6 +295,8 @@ module tb_stream_arbiter #(
         begin
             rst = 1;
             expected_error = 0;
+            contract_enable = 0;
+            allow_contract_violation = 0;
             issue_mask = {PORTS{1'b1}};
             mode_rr = mode;
             s_valid = 0;
@@ -282,6 +307,156 @@ module tb_stream_arbiter #(
             check(!m_valid && s_ready == 0 && protocol_error == 0 && fifo_level == 0, "reset failed to clear state");
             rst = 0;
             tests = tests + 1;
+        end
+    endtask
+
+    task automatic admission;
+        integer h, safe_h, n, i, slow, fast, before_gaps, before_violations;
+        integer upward_checks, downward_checks, incomplete_checks, violation_checks;
+        begin
+            h = admission_level(0);
+            safe_h = 16 - 15/gap;
+            check(gap == 1 || gap == 2 || gap == 4 || gap == 8, "GAP must be 1, 2, 4 or 8");
+            check(expect_starve == 0 || expect_starve == 1, "EXPECT_STARVE must be 0 or 1");
+            if (expect_starve)
+                check(h == safe_h-1 && h > 0, "underflow boundary requires lane 0 H=H*-1>0");
+            else check(h >= safe_h, "safe admission requires lane 0 H>=H*");
+            upward_checks = 0;
+            downward_checks = 0;
+            incomplete_checks = 0;
+            violation_checks = 0;
+
+            // A different source is at its blocked tail. Lane 0's Hth input
+            // arrives on that tail's transfer edge: q0=H, contract phase=0.
+            // This reaches the worst phase that an idle-current-q test misses.
+            reset_epoch();
+            limit[PORTS-1] = 16;
+            cycles(18);
+            m_ready = 1;
+            cycles(15);
+            check(m_valid && m_last && m_source == PORTS-1, "admission tail setup failed");
+            m_ready = 0;
+            cycles(3);
+            contract_enable[0] = 1;
+            limit[0] = h-1;
+            cycles(h-1);
+            check(queued[0] == h-1 && m_valid && m_last, "threshold crossing setup failed");
+            limit[0] = h;
+            m_ready = 1;
+            cycles(1);
+            check(queued[0] == h && m_valid && m_source == 0 && !m_last,
+                  "tail-edge threshold crossing did not authorize the new frame");
+            upward_checks = upward_checks + 1;
+            before_gaps = source_gaps;
+            before_violations = contract_violations;
+            limit[0] = 16;
+            for (n = 1; n <= 16; n = n + 1) begin
+                if (expect_starve && n == 16)
+                    check(!m_valid && frame_beat == 15 && queued[0] == 0,
+                          "H*-1 did not expose the expected 16th-opportunity underflow");
+                else check(m_valid && m_source == 0,
+                           "legal supply unexpectedly starved before the predicted boundary");
+                issue_mask[0] = (n % gap) == 0;
+                cycles(1);
+            end
+            check(source_gaps-before_gaps == expect_starve,
+                  "unexpected source-gap count at the safe/unsafe boundary");
+            issue_mask = {PORTS{1'b1}};
+            drain();
+            check(contract_violations == before_violations && protocol_error == 0,
+                  "tight boundary traffic must obey both the contract and AXIS");
+            check(frames[0] == 1 && frames[PORTS-1] == 1, "boundary frame completion mismatch");
+
+            // Before this tail q=H includes one old tail plus H-1 new beats.
+            // Without a simultaneous push, the remaining prefix is ineligible.
+            reset_epoch();
+            limit[0] = 16;
+            cycles(18);
+            limit[0] = 16+h-1;
+            m_ready = 1;
+            cycles(15);
+            m_ready = 0;
+            cycles(2);
+            check(m_valid && m_last && queued[0] == h, "downward threshold setup failed");
+            m_ready = 1;
+            cycles(1);
+            check(queued[0] == h-1 && !m_valid, "tail pop incorrectly reauthorized a subthreshold prefix");
+            cycles(2);
+            downward_checks = downward_checks + 1;
+            limit[0] = 32;
+            drain();
+
+            // An unknown-supply source with H=16 may pause mid-frame without
+            // locking out a complete competitor. Also exercises heterogeneous
+            // thresholds; use another H>1 lane when this configuration has no 16.
+            slow = -1;
+            for (i = 0; i < PORTS; i = i + 1)
+                if (admission_level(i) == 16 && slow < 0) slow = i;
+            if (slow < 0)
+                for (i = 0; i < PORTS; i = i + 1)
+                    if (admission_level(i) > 1 && slow < 0) slow = i;
+            if (slow >= 0) begin
+                fast = (slow + 1) % PORTS;
+                reset_epoch();
+                limit[slow] = admission_level(slow)-1;
+                m_ready = 1;
+                cycles(20);
+                check(delivered == 0, "subthreshold source started before admission");
+                limit[fast] = 16;
+                cycles(40);
+                check(frames[fast] == 1 && frames[slow] == 0 &&
+                      queued[slow] == admission_level(slow)-1,
+                      "an incomplete unadmitted source blocked its complete competitor");
+                limit[slow] = 16;
+                drain();
+                incomplete_checks = incomplete_checks + 1;
+            end
+
+            // A deliberate contract violation remains AXIS-legal. Once a
+            // partial frame is active, stopping that source blocks competitors;
+            // supplying its remainder recovers without loss, drop or preemption.
+            slow = -1;
+            for (i = 0; i < PORTS; i = i + 1)
+                if (admission_level(i) < 16 && slow < 0) slow = i;
+            if (slow >= 0) begin
+                fast = (slow + 1) % PORTS;
+                reset_epoch();
+                contract_enable[slow] = 1;
+                allow_contract_violation = 1;
+                before_violations = contract_violations;
+                before_gaps = source_gaps;
+                limit[slow] = admission_level(slow);
+                cycles(admission_level(slow)+2);
+                m_ready = 1;
+                cycles(admission_level(slow)+gap+2);
+                check(!m_valid && source_gaps > before_gaps && protocol_error == 0,
+                      "contract violation did not produce AXIS-legal active-frame starvation");
+                limit[fast] = 16;
+                cycles(20);
+                check(frames[fast] == 0 && queued[fast] == 16,
+                      "competitor escaped a locked incomplete frame");
+                limit[slow] = 16;
+                drain();
+                check(contract_violations == before_violations+1 && protocol_error == 0,
+                      "contract violation accounting or legal recovery failed");
+                violation_checks = violation_checks + 1;
+            end
+
+            // Reset during an active frame with queued competitors, then use
+            // the same scoreboard to confirm all stale state was discarded.
+            reset_epoch();
+            for (i = 0; i < PORTS; i = i + 1) limit[i] = 16;
+            cycles(18);
+            m_ready = 1;
+            cycles(5);
+            check(frame_beat == 5 && accepted > delivered, "admission reset setup failed");
+            reset_epoch();
+            check(discarded > 0, "admission reset did not discard outstanding input");
+            limit[0] = 16;
+            drain();
+            $display("ADMISSION GAP=%0d H0=%0d expected_starve=%0d upward=%0d downward=%0d incomplete_competitor=%0d violation_recovery=%0d contract_violations=%0d",
+                     gap, h, expect_starve, upward_checks, downward_checks,
+                     incomplete_checks, violation_checks, contract_violations);
         end
     endtask
 
@@ -524,11 +699,11 @@ module tb_stream_arbiter #(
                 if (win_frames[i] < min_frames) min_frames = win_frames[i];
                 if (win_frames[i] > max_frames) max_frames = win_frames[i];
             end
-            if (test_case != "skew") begin
+            if (test_case != "skew" && ADMISSION_LEVELS == {PORTS{5'd1}}) begin
                 check(win_beats == 3400 && win_gaps == 0 && total_frames == 212,
                       "continuous load did not sustain one beat per cycle");
             end
-            if (test_case == "saturated") begin
+            if (test_case == "saturated" && ADMISSION_LEVELS == {PORTS{5'd1}}) begin
                 if (mode) check(max_frames-min_frames <= 1, "round-robin saturated fairness failed");
                 else check(win_frames[0] == 212 && total_frames == win_frames[0],
                            "fixed-priority saturation should starve lower priority sources");
@@ -617,6 +792,8 @@ module tb_stream_arbiter #(
         if ($value$plusargs("MODE=%d", mode)) begin end
         if ($value$plusargs("CASE=%s", test_case)) begin end
         if ($value$plusargs("SEED=%d", seed)) begin end
+        if ($value$plusargs("GAP=%d", gap)) begin end
+        if ($value$plusargs("EXPECT_STARVE=%d", expect_starve)) begin end
         rng = seed ? seed : 1;
         if ($value$plusargs("EVENTS=%s", event_path)) begin
             events = $fopen(event_path, "w");
@@ -625,6 +802,7 @@ module tb_stream_arbiter #(
         end
         check(mode == 0 || mode == 1, "MODE must be 0 or 1");
         if (test_case == "directed") directed();
+        else if (test_case == "admission") admission();
         else if (test_case == "random") randomized();
         else if (test_case == "negative") negative();
         else if (test_case == "single" || test_case == "saturated" || test_case == "skew" || test_case == "sparse") performance();

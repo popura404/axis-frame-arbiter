@@ -5,7 +5,8 @@
 module axis_stream_arbiter #(
     parameter integer PORTS = 4,
     parameter integer DATA_WIDTH = 32,
-    parameter integer FIFO_DEPTH = 64
+    parameter integer FIFO_DEPTH = 64,
+    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 ) (
     input  wire                                  aclk,
     input  wire                                  aresetn,
@@ -29,7 +30,8 @@ module axis_stream_arbiter #(
     stream_arbiter #(
         .PORTS      (PORTS),
         .DATA_WIDTH (DATA_WIDTH),
-        .FIFO_DEPTH (FIFO_DEPTH)
+        .FIFO_DEPTH (FIFO_DEPTH),
+        .ADMISSION_LEVELS (ADMISSION_LEVELS)
     ) core (
         .clk            (aclk),
         .rst            (!aresetn),

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from run import admission_levels
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,11 +33,21 @@ def main():
     parser.add_argument("--ports", type=int, choices=[2, 4, 8], default=4)
     parser.add_argument("--width", type=int, choices=[32, 64], default=32)
     parser.add_argument("--depth", type=int, choices=[16, 64], default=64)
+    parser.add_argument("--admission", default="1", help="static threshold(s), lane 0 first; scalar repeats")
     args = parser.parse_args()
+    try:
+        levels = admission_levels(args.admission, args.ports)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.top == "stream_selftest" and any(level != 1 for level in levels):
+        parser.error("stream_selftest uses H=1 on every lane")
     if args.top == "stream_selftest" and (args.ports, args.width, args.depth) != (4, 32, 64):
         parser.error("stream_selftest uses the fixed 4-port, 32-bit, depth-64 configuration")
     configuration = f"p{args.ports}-w{args.width}-d{args.depth}"
-    tcl_args = [args.top, args.context, str(args.ports), str(args.width), str(args.depth)]
+    if any(level != 1 for level in levels):
+        configuration += "-h" + "-".join(map(str, levels))
+    tcl_args = [args.top, args.context, str(args.ports), str(args.width), str(args.depth),
+                ",".join(map(str, levels))]
     executable = os.environ.get("VIVADO") or shutil.which("vivado") or shutil.which("vivado.bat")
     if not executable:
         for path in (Path("/mnt/e/AMDDesignTools/2025.2/Vivado/bin/vivado.bat"),

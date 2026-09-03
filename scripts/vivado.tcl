@@ -7,12 +7,12 @@ set context registered
 set ports 4
 set width 32
 set depth 64
-if {$argc ni {0 1 2 5}} {
-    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth?"
+if {$argc ni {0 1 2 5 6}} {
+    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv?"
 }
 if {$argc >= 1} {set top [lindex $argv 0]}
 if {$argc >= 2} {set context [lindex $argv 1]}
-if {$argc == 5} {lassign [lrange $argv 2 4] ports width depth}
+if {$argc >= 5} {lassign [lrange $argv 2 4] ports width depth}
 if {$top ni {stream_arbiter axis_stream_arbiter stream_selftest} ||
     $context ni {registered ports}} {
     error "Unsupported top/context"
@@ -25,7 +25,24 @@ foreach {name value allowed} [list PORTS $ports {2 4 8} DATA_WIDTH $width {32 64
 if {$top eq "stream_selftest" && ($ports != 4 || $width != 32 || $depth != 64)} {
     error "stream_selftest uses the fixed 4-port, 32-bit, depth-64 configuration"
 }
+set levels [lrepeat $ports 1]
+if {$argc == 6} {set levels [split [lindex $argv 5] ,]}
+if {[llength $levels] == 1} {set levels [lrepeat $ports [lindex $levels 0]]}
+if {[llength $levels] != $ports} {error "One admission value per port is required"}
+set admission 0
+set nondefault 0
+set lane 0
+foreach level $levels {
+    if {![string is integer -strict $level] || $level < 1 || $level > 16} {
+        error "Admission thresholds must be integers in 1..16"
+    }
+    set admission [expr {$admission | ($level << (5*$lane))}]
+    if {$level != 1} {set nondefault 1}
+    incr lane
+}
+if {$top eq "stream_selftest" && $nondefault} {error "stream_selftest requires H=1"}
 set configuration p${ports}-w${width}-d${depth}
+if {$nondefault} {append configuration -h[join $levels -]}
 set out_dir [file join $root build vivado $top $configuration $context]
 file mkdir $out_dir
 cd $out_dir
@@ -38,7 +55,7 @@ read_verilog -sv [lsort [glob [file join $root rtl *.sv]]]
 read_xdc [file join $root scripts clock.xdc]
 set synth_args [list -top $top -part $part -mode out_of_context]
 if {$top ne "stream_selftest"} {
-    foreach generic [list PORTS=$ports DATA_WIDTH=$width FIFO_DEPTH=$depth] {
+    foreach generic [list PORTS=$ports DATA_WIDTH=$width FIFO_DEPTH=$depth "ADMISSION_LEVELS=[expr {$ports*5}]'d$admission"] {
         lappend synth_args -generic $generic
     }
 }

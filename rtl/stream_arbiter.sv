@@ -4,7 +4,9 @@
 module stream_arbiter #(
     parameter integer PORTS = 4,
     parameter integer DATA_WIDTH = 32,
-    parameter integer FIFO_DEPTH = 64
+    parameter integer FIFO_DEPTH = 64,
+    // Each lane has a static 1..16 beat admission threshold; lane 0 is bits 4:0.
+    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 ) (
     input  wire         clk,
     input  wire         rst,
@@ -28,7 +30,7 @@ module stream_arbiter #(
     wire [PORTS*DATA_WIDTH-1:0] head_data;
     wire [PORTS-1:0] head_last;
     wire [PORTS-1:0] head_valid;
-    wire [PORTS-1:0] head_valid_next;
+    wire [PORTS-1:0] eligible, eligible_next;
     wire [PORTS-1:0] head_ready;
     wire grant_active;
     wire frame_done;
@@ -43,6 +45,19 @@ module stream_arbiter #(
             STREAM_ARBITER_UNSUPPORTED_PARAMETERS invalid_configuration ();
         end
         for (lane = 0; lane < PORTS; lane = lane + 1) begin : inputs
+            localparam [4:0] ADMISSION = ADMISSION_LEVELS[lane*5 +: 5];
+            wire [LEVEL_WIDTH-1:0] level = fifo_level[lane*LEVEL_WIDTH +: LEVEL_WIDTH];
+            wire push = s_valid[lane] && s_ready[lane];
+            wire pop = head_valid[lane] && head_ready[lane];
+            wire [LEVEL_WIDTH-1:0] level_next = level +
+                {{(LEVEL_WIDTH-1){1'b0}}, push} - {{(LEVEL_WIDTH-1){1'b0}}, pop};
+            if (ADMISSION < 1 || ADMISSION > 16) begin : unsupported_admission
+                STREAM_ARBITER_UNSUPPORTED_ADMISSION invalid_admission ();
+            end
+            // Admission is checked only when selecting a new frame. The mux
+            // continues to use nonempty, independently of the threshold.
+            assign eligible[lane] = !rst && (level >= ADMISSION);
+            assign eligible_next[lane] = !rst && (level_next >= ADMISSION);
             stream_fifo #(
                 .DATA_WIDTH (DATA_WIDTH),
                 .FIFO_DEPTH (FIFO_DEPTH)
@@ -58,21 +73,21 @@ module stream_arbiter #(
                 .m_valid        (head_valid[lane]),
                 .m_ready        (head_ready[lane]),
                 .level          (fifo_level[lane*LEVEL_WIDTH +: LEVEL_WIDTH]),
-                .next_valid     (head_valid_next[lane]),
+                .next_valid     (),
                 .protocol_error (protocol_error[lane])
             );
         end
     endgenerate
 
-    // 2. 根据非空状态选择一路；帧尾按出入队后的状态直接交接授权。
+    // 2. 根据准入水位选择一路；帧尾按出入队后的状态直接交接授权。
     frame_arbiter #(
         .PORTS (PORTS)
     ) scheduler (
         .clk            (clk),
         .rst            (rst),
         .mode_rr        (mode_rr),
-        .available      (head_valid),
-        .available_next (head_valid_next),
+        .available      (eligible),
+        .available_next (eligible_next),
         .frame_done     (frame_done),
         .active         (grant_active),
         .source         (m_source)
