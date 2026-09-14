@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/alexforencich/verilog-axis",
+  "commit": "48ff7a7e2ef782cf778d47910cf85835c64b1bce",
+  "commit_date": "2025-02-27T23:50:11Z",
+  "license": "MIT",
+  "files": [
+    {"path": "rtl/axis_fifo.v", "sha256": "aefddc67fc3552d919280424606fc6b048e61d7df9ee7ee0f8801c082c1cfc39"},
+    {"path": "rtl/axis_arb_mux.v", "sha256": "bee8d11f32f7fb1c5afdd6cdad872cd7de9dc94bcb4787f9aa119f2ebbc489a6"},
+    {"path": "rtl/arbiter.v", "sha256": "d54d337db4812f927b2e9b5788dfa39f9bd578ad01b7846c5fa7f2610b0923fa"},
+    {"path": "rtl/priority_encoder.v", "sha256": "df28220d95b47df349a72803a9751aad331eb8e1435416e8686d00572a974dd5"},
+    {"path": "COPYING", "sha256": "8ea57f95365e9b16a5b516f422b71269183a1ae53bab5878ae6d69039e58fe77"}
+  ]
+}

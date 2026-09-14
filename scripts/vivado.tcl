@@ -7,13 +7,13 @@ set context registered
 set ports 4
 set width 32
 set depth 64
-if {$argc ni {0 1 2 5 6}} {
-    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv?"
+if {$argc ni {0 1 2 5 6 7}} {
+    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv? ?frame_fifo?"
 }
 if {$argc >= 1} {set top [lindex $argv 0]}
 if {$argc >= 2} {set context [lindex $argv 1]}
 if {$argc >= 5} {lassign [lrange $argv 2 4] ports width depth}
-if {$top ni {stream_arbiter axis_stream_arbiter stream_selftest} ||
+if {$top ni {stream_arbiter axis_stream_arbiter stream_selftest axis_external} ||
     $context ni {registered ports}} {
     error "Unsupported top/context"
 }
@@ -26,9 +26,13 @@ if {$top eq "stream_selftest" && ($ports != 4 || $width != 32 || $depth != 64)} 
     error "stream_selftest uses the fixed 4-port, 32-bit, depth-64 configuration"
 }
 set levels [lrepeat $ports 1]
-if {$argc == 6} {set levels [split [lindex $argv 5] ,]}
+if {$argc >= 6} {set levels [split [lindex $argv 5] ,]}
 if {[llength $levels] == 1} {set levels [lrepeat $ports [lindex $levels 0]]}
 if {[llength $levels] != $ports} {error "One admission value per port is required"}
+set frame_fifo 0
+if {$argc == 7} {set frame_fifo [lindex $argv 6]}
+if {$frame_fifo ni {0 1}} {error "FRAME_FIFO must be 0 or 1"}
+if {$top ne "axis_external" && $frame_fifo} {error "FRAME_FIFO is external-only"}
 set admission 0
 set nondefault 0
 set lane 0
@@ -41,8 +45,10 @@ foreach level $levels {
     incr lane
 }
 if {$top eq "stream_selftest" && $nondefault} {error "stream_selftest requires H=1"}
+if {$top eq "axis_external" && $nondefault} {error "External reference has no admission parameter"}
 set configuration p${ports}-w${width}-d${depth}
 if {$nondefault} {append configuration -h[join $levels -]}
+if {$top eq "axis_external"} {append configuration -frame${frame_fifo}}
 set out_dir [file join $root build vivado $top $configuration $context]
 file mkdir $out_dir
 cd $out_dir
@@ -52,11 +58,22 @@ create_project -in_memory -part $part
 set_property target_language Verilog [current_project]
 set_param general.maxThreads 4
 read_verilog -sv [lsort [glob [file join $root rtl *.sv]]]
+if {$top eq "axis_external"} {
+    read_verilog -sv [file join $root sim axis_external.sv]
+    foreach source {axis_fifo.v axis_arb_mux.v arbiter.v priority_encoder.v} {
+        read_verilog [file join $root build vendor verilog-axis rtl $source]
+    }
+}
 read_xdc [file join $root scripts clock.xdc]
 set synth_args [list -top $top -part $part -mode out_of_context]
 if {$top ne "stream_selftest"} {
-    foreach generic [list PORTS=$ports DATA_WIDTH=$width FIFO_DEPTH=$depth "ADMISSION_LEVELS=[expr {$ports*5}]'d$admission"] {
+    foreach generic [list PORTS=$ports DATA_WIDTH=$width FIFO_DEPTH=$depth] {
         lappend synth_args -generic $generic
+    }
+    if {$top eq "axis_external"} {
+        lappend synth_args -generic FRAME_FIFO=$frame_fifo
+    } else {
+        lappend synth_args -generic "ADMISSION_LEVELS=[expr {$ports*5}]'d$admission"
     }
 }
 synth_design {*}$synth_args

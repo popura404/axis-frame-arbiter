@@ -27,18 +27,27 @@ def validate_result(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("top", nargs="?", default="stream_arbiter",
-                        choices=["stream_arbiter", "axis_stream_arbiter", "stream_selftest"])
+                        choices=["stream_arbiter", "axis_stream_arbiter", "stream_selftest", "axis_external"])
     parser.add_argument("--context", default="registered", choices=["registered", "ports"],
                         help="registered: physical same-clock boundary; ports: original abstract I/O diagnostic")
     parser.add_argument("--ports", type=int, choices=[2, 4, 8], default=4)
     parser.add_argument("--width", type=int, choices=[32, 64], default=32)
     parser.add_argument("--depth", type=int, choices=[16, 64], default=64)
     parser.add_argument("--admission", default="1", help="static threshold(s), lane 0 first; scalar repeats")
+    parser.add_argument("--frame-fifo", type=int, choices=[0, 1], default=0,
+                        help="external reference only: word (0) or frame (1) FIFO")
     args = parser.parse_args()
     try:
         levels = admission_levels(args.admission, args.ports)
     except ValueError as error:
         parser.error(str(error))
+    if args.top == "axis_external":
+        if any(level != 1 for level in levels):
+            parser.error("external reference has no configurable admission threshold")
+        from fetch_axis import fetch
+        fetch()
+    elif args.frame_fifo:
+        parser.error("--frame-fifo applies only to axis_external")
     if args.top == "stream_selftest" and any(level != 1 for level in levels):
         parser.error("stream_selftest uses H=1 on every lane")
     if args.top == "stream_selftest" and (args.ports, args.width, args.depth) != (4, 32, 64):
@@ -46,8 +55,10 @@ def main():
     configuration = f"p{args.ports}-w{args.width}-d{args.depth}"
     if any(level != 1 for level in levels):
         configuration += "-h" + "-".join(map(str, levels))
+    if args.top == "axis_external":
+        configuration += f"-frame{args.frame_fifo}"
     tcl_args = [args.top, args.context, str(args.ports), str(args.width), str(args.depth),
-                ",".join(map(str, levels))]
+                ",".join(map(str, levels)), str(args.frame_fifo)]
     executable = os.environ.get("VIVADO") or shutil.which("vivado") or shutil.which("vivado.bat")
     if not executable:
         for path in (Path("/mnt/e/AMDDesignTools/2025.2/Vivado/bin/vivado.bat"),

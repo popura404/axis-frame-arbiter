@@ -6,6 +6,8 @@ module tb_stream_arbiter #(
     parameter integer DATA_WIDTH = 32,
     parameter integer FIFO_DEPTH = 64,
     parameter integer AXIS = 0,
+    parameter integer EXTERNAL = 0,
+    parameter integer FRAME_FIFO = 0,
     parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 );
     localparam SOURCE_WIDTH = $clog2(PORTS);
@@ -25,7 +27,18 @@ module tb_stream_arbiter #(
     wire [SOURCE_WIDTH-1:0] m_source;
 
     generate
-        if (AXIS) begin : axi_interface
+        if (EXTERNAL) begin : external_interface
+            axis_external #(
+                .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
+                .FRAME_FIFO(FRAME_FIFO)
+            ) dut (
+                .clk(clk), .rst(rst), .s_data(s_data), .s_last(s_last),
+                .s_valid(s_valid), .s_ready(s_ready), .m_data(m_data),
+                .m_last(m_last), .m_valid(m_valid), .m_ready(m_ready), .m_source(m_source)
+            );
+            assign fifo_level = 0; // External storage has different capacity/pipeline.
+            assign protocol_error = 0; // Input legality is checked by this testbench.
+        end else if (AXIS) begin : axi_interface
             axis_stream_arbiter #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
                 .ADMISSION_LEVELS(ADMISSION_LEVELS)
@@ -45,7 +58,7 @@ module tb_stream_arbiter #(
         end
     endgenerate
 
-    localparam QSIZE = FIFO_DEPTH + 1;
+    localparam QSIZE = FIFO_DEPTH + (EXTERNAL ? 5 : 1);
     reg [DATA_WIDTH:0] queue_data [0:PORTS-1][0:QSIZE-1];
     integer head [0:PORTS-1], tail [0:PORTS-1], queued [0:PORTS-1];
     integer issued [0:PORTS-1], limit [0:PORTS-1], frames [0:PORTS-1];
@@ -61,7 +74,7 @@ module tb_stream_arbiter #(
     integer violation_count = 0, seed = 1, events = 0;
     reg [31:0] rng = 1;
     string event_path;
-    integer cycle = 0, ref_grant = -1, ref_cursor = 0, frame_beat = 0;
+    integer cycle = 0, ref_grant = -1, ref_cursor = 0, frame_beat = 0, frame_source = 0;
     integer mode = 0, tests = 0, source_gaps = 0, stall_cycles = 0;
     integer full_cycles = 0, tail_stalls = 0;
     reg stalled = 0;
@@ -114,9 +127,11 @@ module tb_stream_arbiter #(
                 ref_grant = -1;
                 ref_cursor = 0;
                 frame_beat = 0;
+                frame_source = 0;
                 stalled = 0;
                 input_stalled = 0;
             end else begin
+                if (test_case == "study") study_sample();
                 if (!expected_error) check(protocol_error === {PORTS{1'b0}}, "unexpected input protocol error");
                 if (measuring) win_cycles = win_cycles + 1;
                 for (i = 0; i < PORTS; i = i + 1) begin
@@ -157,7 +172,7 @@ module tb_stream_arbiter #(
                 end
 
                 candidate = -1;
-                if (ref_grant < 0) begin
+                if (!EXTERNAL && ref_grant < 0) begin
                     if (measuring) win_gaps = win_gaps + 1;
                     check(!m_valid, "output presented before grant was registered");
                     // This set is independent of the DUT's FIFO flags or grant state.
@@ -165,7 +180,7 @@ module tb_stream_arbiter #(
                         i = mode ? ((ref_cursor + offset) % PORTS) : offset;
                         if (candidate < 0 && queued[i] >= admission_level(i)) candidate = i;
                     end
-                end else begin
+                end else if (!EXTERNAL) begin
                     check(m_valid === (queued[ref_grant] != 0),
                           "authorized nonempty queue did not present data, or empty queue did");
                     if (m_valid)
@@ -177,7 +192,8 @@ module tb_stream_arbiter #(
                 end
 
                 for (i = 0; i < PORTS; i = i + 1) begin
-                    check(fifo_level[i*LEVEL_WIDTH +: LEVEL_WIDTH] == queued[i], "FIFO level differs from accepted transactions");
+                    if (!EXTERNAL)
+                        check(fifo_level[i*LEVEL_WIDTH +: LEVEL_WIDTH] == queued[i], "FIFO level differs from accepted transactions");
                     if (queued[i] == FIFO_DEPTH) full_cycles = full_cycles + 1;
                 end
 
@@ -189,10 +205,12 @@ module tb_stream_arbiter #(
                     check({m_last, m_data} === queue_data[src][head[src]], "data/LAST mismatch or source reordering");
                     check(m_data[DATA_WIDTH-1 -: SOURCE_WIDTH] == src, "payload source identifier mismatch");
                     if (!expected_error) begin
+                        if (frame_beat != 0) check(src == frame_source, "output switched sources within a frame");
                         check(m_data[3:0] == frame_beat, "output frame interleaved or beat order wrong");
                         check(m_last == (frame_beat == 15), "output frame length/LAST wrong");
                     end
                     if (frame_beat == 0) begin
+                        frame_source = src;
                         wait_time = cycle - frame_time[src][out_started[src] % 4096];
                         out_started[src] = out_started[src] + 1;
                         if (measuring) begin
@@ -220,7 +238,7 @@ module tb_stream_arbiter #(
 
                 for (i = 0; i < PORTS; i = i + 1)
                     if (s_valid[i] && s_ready[i]) begin
-                        check(queued[i] < FIFO_DEPTH, "FIFO accepted beyond capacity");
+                        check(queued[i] < QSIZE-1, "input accepted beyond storage capacity");
                         if ((issued[i] % 16) == 0) begin
                             frame_time[i][in_frames[i] % 4096] = cycle;
                             in_frames[i] = in_frames[i] + 1;
@@ -239,7 +257,7 @@ module tb_stream_arbiter #(
                 // tail cannot regrant its now-empty source; a newly accepted
                 // first beat may immediately compete. Idle selection above
                 // deliberately retains the existing registered startup cycle.
-                if (tail_transfer) begin
+                if (tail_transfer && !EXTERNAL) begin
                     candidate = -1;
                     for (offset = 0; offset < PORTS; offset = offset + 1) begin
                         i = mode ? ((ref_cursor + offset) % PORTS) : offset;
@@ -776,6 +794,8 @@ module tb_stream_arbiter #(
         end
     endtask
 
+    `include "sim/study_tasks.svh"
+
     integer init_i;
     // A deadlocked design must fail rather than leave a batch regression hung.
     initial begin
@@ -801,8 +821,10 @@ module tb_stream_arbiter #(
             $fdisplay(events, "cycle,event,source,data_or_wait,last,measured");
         end
         check(mode == 0 || mode == 1, "MODE must be 0 or 1");
+        if (EXTERNAL) check(mode == 1 && test_case == "study", "external reference is RR study only");
         if (test_case == "directed") directed();
         else if (test_case == "admission") admission();
+        else if (test_case == "study") study();
         else if (test_case == "random") randomized();
         else if (test_case == "negative") negative();
         else if (test_case == "single" || test_case == "saturated" || test_case == "skew" || test_case == "sparse") performance();
