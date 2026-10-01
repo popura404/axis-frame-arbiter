@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Icarus regression: all = core, AXI matrix, wide/shallow negatives and parameter guards."""
+"""Icarus regression: fixed frames, packet mode, interface boundaries and parameter guards."""
 import argparse
 import csv
 import itertools
@@ -80,27 +80,38 @@ def packed_admission(levels):
 def reject_unsupported_parameters(rtl):
     """Require the RTL's specific elaboration guard, not any compiler error."""
     top = "axis_stream_arbiter"
+    cases = []
     for name, value in (("PORTS", 3), ("DATA_WIDTH", 48), ("FIFO_DEPTH", 32),
                         ("ADMISSION_LEVELS", packed_admission((0, 1, 1, 1))),
                         ("ADMISSION_LEVELS", packed_admission((17, 1, 1, 1)))):
-        folder = BUILD / "invalid" / f"{name.lower()}-{value}"
+        guard = "STREAM_ARBITER_UNSUPPORTED_ADMISSION" if name == "ADMISSION_LEVELS" else "STREAM_ARBITER_UNSUPPORTED_PARAMETERS"
+        cases.append((f"{name.lower()}-{value}", {name: value}, guard))
+    packet_guard = "STREAM_ARBITER_UNSUPPORTED_PACKET_PARAMETERS"
+    cases += [("packet-mode-2", {"PACKET_MODE": 2}, packet_guard),
+              ("max-frame-0", {"MAX_FRAME_BEATS": 0}, packet_guard),
+              ("max-frame-65", {"MAX_FRAME_BEATS": 65}, packet_guard),
+              ("packet-max-0", {"PACKET_MODE": 1, "MAX_FRAME_BEATS": 0}, packet_guard),
+              ("packet-max-17-depth-16", {"PACKET_MODE": 1, "FIFO_DEPTH": 16, "MAX_FRAME_BEATS": 17}, packet_guard),
+              ("packet-admission", {"PACKET_MODE": 1, "ADMISSION_LEVELS": packed_admission((2, 1, 1, 1))}, packet_guard)]
+    for label, parameters, guard in cases:
+        folder = BUILD / "invalid" / label
         folder.mkdir(parents=True, exist_ok=True)
         output = (folder / "rejected.vvp").relative_to(ROOT).as_posix()
-        command = [tool("iverilog"), "-g2012", "-s", top, f"-P{top}.{name}={value}",
+        command = [tool("iverilog"), "-g2012", "-s", top,
+                   *[f"-P{top}.{name}={value}" for name, value in parameters.items()],
                    "-o", output, *rtl]
         result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT)
         (folder / "compile.log").write_text(result.stdout, encoding="utf-8")
-        guard = "STREAM_ARBITER_UNSUPPORTED_ADMISSION" if name == "ADMISSION_LEVELS" else "STREAM_ARBITER_UNSUPPORTED_PARAMETERS"
         if result.returncode == 0 or guard not in result.stdout:
-            raise SystemExit(f"Unsupported {name}={value} did not hit the RTL elaboration guard; inspect {folder}")
-        print(f"EXPECTED_REJECTION {name}={value}")
-    return 5
+            raise SystemExit(f"Unsupported {parameters} did not hit the RTL elaboration guard; inspect {folder}")
+        print(f"EXPECTED_REJECTION {label} {parameters}")
+    return len(cases)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("suite", choices=CASES + ["admission", "perf", "matrix", "parameters", "all"])
+    parser.add_argument("suite", choices=CASES + ["admission", "packet", "perf", "matrix", "parameters", "all"])
     parser.add_argument("--mode", type=int, choices=[0, 1], help="default: both policies")
     parser.add_argument("--seed", type=int, action="append", help="random seeds; default 1, 20261026; matrix always uses 1")
     parser.add_argument("--events", action="store_true", help="write handshake CSV (including frame waits)")
@@ -109,6 +120,7 @@ def main():
     parser.add_argument("--depth", type=int, choices=[16, 64], default=64)
     parser.add_argument("--axis", action="store_true", help="test the AXI4-Stream top instead of the native core")
     parser.add_argument("--admission", default="1", help="static threshold(s), lane 0 first; scalar repeats")
+    parser.add_argument("--max-frame-beats", type=int, help="packet suite: maximum legal frame length (default: FIFO depth)")
     parser.add_argument("--gap", type=int, choices=[1, 2, 4, 8], default=2,
                         help="source opportunity contract for the admission boundary case")
     parser.add_argument("--expect-starve", action="store_true", help="require the H*-1 legal-source counterexample")
@@ -118,6 +130,13 @@ def main():
         selected_levels = admission_levels(args.admission, args.ports)
     except ValueError as error:
         parser.error(str(error))
+    max_frame_beats = args.max_frame_beats if args.max_frame_beats is not None else args.depth
+    if args.max_frame_beats is not None and args.suite != "packet":
+        parser.error("--max-frame-beats applies only to packet")
+    if not 1 <= max_frame_beats <= args.depth:
+        parser.error("--max-frame-beats must be in 1..FIFO_DEPTH")
+    if args.suite == "packet" and any(level != 1 for level in selected_levels):
+        parser.error("packet mode requires the default --admission 1")
     if args.suite in ("fifo", "selftest", "all", "matrix", "parameters") and args.admission != "1":
         parser.error(f"{args.suite} uses fixed admission configurations")
     if args.suite != "admission" and (args.expect_starve or args.gap != 2):
@@ -135,7 +154,7 @@ def main():
     if args.suite not in ("matrix", "parameters"):
         selected = CASES if args.suite == "all" else PERF if args.suite == "perf" else [args.suite]
         for case in selected:
-            jobs.append((config, case, (args.seed or [1, 20261026]) if case == "random" else [1]))
+            jobs.append((config, case, (args.seed or [1, 20261026]) if case == "random" else (args.seed or [1]) if case == "packet" else [1]))
     if args.suite in ("all", "matrix"):
         for ports, width, depth in itertools.product((2, 4, 8), (32, 64), (16, 64)):
             for case in MATRIX_CASES:
@@ -156,32 +175,44 @@ def main():
         jobs.extend([((2, 32, 16, True), "admission", [1], (9, 16), 2, False),
                      ((8, 64, 64, True), "admission", [1], (15, 1, 9, 13, 16, 1, 9, 13), 8, False)])
 
+    jobs = [(*job, int(job[1] == "packet"), max_frame_beats if job[1] == "packet" else job[0][2])
+            for job in jobs]
+    if args.suite == "all":
+        for current, bound in (((4, 32, 16, False), 16), ((4, 32, 16, True), 16),
+                               ((2, 32, 16, True), 1), ((4, 32, 16, True), 7),
+                               ((8, 64, 16, True), 13), ((2, 64, 64, True), 31),
+                               ((4, 32, 64, True), 64), ((8, 64, 64, True), 64)):
+            jobs.append((current, "packet", [1], (1,) * current[0], 1, False, 1, bound))
+
     # Match Vivado's rtl/*.sv source discovery; -s elaborates only the chosen top.
     rtl = [path.relative_to(ROOT).as_posix() for path in sorted((ROOT / "rtl").glob("*.sv"))]
     compiled = set()
     simulations = 0
-    for current, case, seeds, levels, gap, unsafe in jobs:
+    for current, case, seeds, levels, gap, unsafe, packet_mode, frame_bound in jobs:
         ports, width, depth, axis = current
         tag = configuration_name(current)
         if any(level != 1 for level in levels):
             tag += "-h" + "-".join(map(str, levels))
+        if packet_mode:
+            tag += f"-packet-max{frame_bound}"
         folder = BUILD / tag
         folder.mkdir(parents=True, exist_ok=True)
         top = "tb_fifo" if case == "fifo" else "tb_stream_selftest" if case == "selftest" else "tb_stream_arbiter"
         output = (folder / f"{top}.vvp").relative_to(ROOT).as_posix()
-        key = (current, top, levels)
+        key = (current, top, levels, packet_mode, frame_bound)
         if key not in compiled:
             parameters = []
             if top == "tb_stream_arbiter":
                 parameters = [f"-P{top}.{name}={value}" for name, value in
-                              (("PORTS", ports), ("DATA_WIDTH", width), ("FIFO_DEPTH", depth), ("AXIS", int(axis)))]
+                              (("PORTS", ports), ("DATA_WIDTH", width), ("FIFO_DEPTH", depth), ("AXIS", int(axis)),
+                               ("PACKET_MODE", packet_mode), ("MAX_FRAME_BEATS", frame_bound))]
                 parameters.append(f"-P{top}.ADMISSION_LEVELS={ports*5}'d{packed_admission(levels)}")
             run([tool("iverilog"), "-g2012", "-Wall", "-s", top, *parameters, "-o", output,
                  *rtl, f"sim/{top}.sv"], folder / f"{top}-compile.log")
             compiled.add(key)
         for mode in ([0] if case in ("fifo", "selftest") else modes):
             for seed in seeds:
-                name = f"{case}-{mode}" + (f"-seed{seed}" if case == "random" else "")
+                name = f"{case}-{mode}" + (f"-seed{seed}" if case in ("random", "packet") else "")
                 print(f"RUN {tag} {name}", flush=True)
                 command = [tool("vvp"), output, f"+CASE={case}", f"+MODE={mode}", f"+SEED={seed}"]
                 if case == "admission":

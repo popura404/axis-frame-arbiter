@@ -2,7 +2,9 @@
 // 单路输入封装：将 DATA/LAST 一起缓存，协议监测独立于存储通路。
 module stream_fifo #(
     parameter integer DATA_WIDTH = 32,
-    parameter integer FIFO_DEPTH = 64
+    parameter integer FIFO_DEPTH = 64,
+    parameter integer PACKET_MODE = 0,
+    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -19,8 +21,14 @@ module stream_fifo #(
 
     output wire [$clog2(FIFO_DEPTH):0] level,
     output wire        next_valid,
-    output wire        protocol_error
+    output wire        protocol_error,
+    output wire        frame_available,
+    output wire        frame_available_next
 );
+    wire fifo_ready, frame_bad, frame_fault;
+    wire accepting = !PACKET_MODE || !frame_fault;
+    assign s_ready = fifo_ready && accepting;
+
     sync_fifo #(
         .WIDTH (DATA_WIDTH + 1),
         .DEPTH (FIFO_DEPTH)
@@ -28,8 +36,8 @@ module stream_fifo #(
         .clk        (clk),
         .rst        (rst),
         .s_data     ({s_last, s_data}),
-        .s_valid    (s_valid),
-        .s_ready    (s_ready),
+        .s_valid    (s_valid && accepting),
+        .s_ready    (fifo_ready),
         .m_data     ({m_last, m_data}),
         .m_valid    (m_valid),
         .m_ready    (m_ready),
@@ -38,7 +46,9 @@ module stream_fifo #(
     );
 
     stream_protocol_checker #(
-        .DATA_WIDTH (DATA_WIDTH)
+        .DATA_WIDTH (DATA_WIDTH),
+        .PACKET_MODE (PACKET_MODE),
+        .MAX_FRAME_BEATS (MAX_FRAME_BEATS)
     ) protocol_monitor (
         .clk            (clk),
         .rst            (rst),
@@ -46,6 +56,31 @@ module stream_fifo #(
         .last           (s_last),
         .valid          (s_valid),
         .ready          (s_ready),
-        .protocol_error (protocol_error)
+        .protocol_error (protocol_error),
+        .frame_bad      (frame_bad),
+        .frame_fault    (frame_fault)
     );
+
+    generate
+        if (PACKET_MODE) begin : packets
+            // A depth-D FIFO can contain D one-beat frames. Complete frames
+            // always precede the unfinished tail; no rollback pointer is needed.
+            localparam integer COUNT_WIDTH = $clog2(FIFO_DEPTH) + 1;
+            reg [COUNT_WIDTH-1:0] complete_frames;
+            wire commit_frame = s_valid && s_ready && s_last && !frame_bad;
+            wire finish_frame = m_valid && m_ready && m_last;
+            wire [COUNT_WIDTH-1:0] complete_next = complete_frames +
+                {{(COUNT_WIDTH-1){1'b0}}, commit_frame} -
+                {{(COUNT_WIDTH-1){1'b0}}, finish_frame};
+            assign frame_available = !rst && (complete_frames != 0);
+            assign frame_available_next = !rst && (complete_next != 0);
+            always @(posedge clk) begin
+                if (rst) complete_frames <= 0;
+                else complete_frames <= complete_next;
+            end
+        end else begin : words
+            assign frame_available = 1'b0;
+            assign frame_available_next = 1'b0;
+        end
+    endgenerate
 endmodule

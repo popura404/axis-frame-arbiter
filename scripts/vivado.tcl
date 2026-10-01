@@ -7,8 +7,8 @@ set context registered
 set ports 4
 set width 32
 set depth 64
-if {$argc ni {0 1 2 5 6 7}} {
-    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv? ?frame_fifo?"
+if {$argc ni {0 1 2 5 6 7 8 9}} {
+    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv? ?frame_fifo? ?packet_mode? ?max_frame_beats?"
 }
 if {$argc >= 1} {set top [lindex $argv 0]}
 if {$argc >= 2} {set context [lindex $argv 1]}
@@ -30,9 +30,20 @@ if {$argc >= 6} {set levels [split [lindex $argv 5] ,]}
 if {[llength $levels] == 1} {set levels [lrepeat $ports [lindex $levels 0]]}
 if {[llength $levels] != $ports} {error "One admission value per port is required"}
 set frame_fifo 0
-if {$argc == 7} {set frame_fifo [lindex $argv 6]}
+if {$argc >= 7} {set frame_fifo [lindex $argv 6]}
 if {$frame_fifo ni {0 1}} {error "FRAME_FIFO must be 0 or 1"}
 if {$top ne "axis_external" && $frame_fifo} {error "FRAME_FIFO is external-only"}
+set packet_mode 0
+set max_frame_beats $depth
+if {$argc >= 8} {set packet_mode [lindex $argv 7]}
+if {$argc >= 9} {set max_frame_beats [lindex $argv 8]}
+if {$packet_mode ni {0 1}} {error "PACKET_MODE must be 0 or 1"}
+if {$top ni {stream_arbiter axis_stream_arbiter} && ($packet_mode || $argc >= 9)} {
+    error "PACKET_MODE/MAX_FRAME_BEATS apply only to the local core and AXIS tops"
+}
+if {![string is integer -strict $max_frame_beats] || $max_frame_beats < 1 || $max_frame_beats > $depth} {
+    error "MAX_FRAME_BEATS must be an integer in 1..FIFO_DEPTH"
+}
 set admission 0
 set nondefault 0
 set lane 0
@@ -46,8 +57,10 @@ foreach level $levels {
 }
 if {$top eq "stream_selftest" && $nondefault} {error "stream_selftest requires H=1"}
 if {$top eq "axis_external" && $nondefault} {error "External reference has no admission parameter"}
+if {$packet_mode && $nondefault} {error "Packet mode requires H=1 on every lane"}
 set configuration p${ports}-w${width}-d${depth}
 if {$nondefault} {append configuration -h[join $levels -]}
+if {$packet_mode} {append configuration -packet-m${max_frame_beats}}
 if {$top eq "axis_external"} {append configuration -frame${frame_fifo}}
 set out_dir [file join $root build vivado $top $configuration $context]
 file mkdir $out_dir
@@ -74,6 +87,7 @@ if {$top ne "stream_selftest"} {
         lappend synth_args -generic FRAME_FIFO=$frame_fifo
     } else {
         lappend synth_args -generic "ADMISSION_LEVELS=[expr {$ports*5}]'d$admission"
+        lappend synth_args -generic PACKET_MODE=$packet_mode -generic MAX_FRAME_BEATS=$max_frame_beats
     }
 }
 synth_design {*}$synth_args

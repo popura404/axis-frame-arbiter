@@ -1,12 +1,14 @@
 `timescale 1ns/1ps
 // 功能顶层：多路输入缓存 -> 帧级授权 -> 一路输出。
-// 第 i 路数据位于 s_data[i*DATA_WIDTH +: DATA_WIDTH]，每帧固定 16 拍。
+// Fixed-16 watermark admission by default; optional bounded complete-frame mode.
 module stream_arbiter #(
     parameter integer PORTS = 4,
     parameter integer DATA_WIDTH = 32,
     parameter integer FIFO_DEPTH = 64,
     // Each lane has a static 1..16 beat admission threshold; lane 0 is bits 4:0.
-    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
+    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}},
+    parameter integer PACKET_MODE = 0,
+    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH
 ) (
     input  wire         clk,
     input  wire         rst,
@@ -44,11 +46,17 @@ module stream_arbiter #(
             (FIFO_DEPTH != 16 && FIFO_DEPTH != 64)) begin : unsupported_configuration
             STREAM_ARBITER_UNSUPPORTED_PARAMETERS invalid_configuration ();
         end
+        if ((PACKET_MODE != 0 && PACKET_MODE != 1) ||
+            MAX_FRAME_BEATS < 1 || MAX_FRAME_BEATS > FIFO_DEPTH ||
+            (PACKET_MODE && ADMISSION_LEVELS != {PORTS{5'd1}})) begin : unsupported_packet
+            STREAM_ARBITER_UNSUPPORTED_PACKET_PARAMETERS invalid_packet ();
+        end
         for (lane = 0; lane < PORTS; lane = lane + 1) begin : inputs
             localparam [4:0] ADMISSION = ADMISSION_LEVELS[lane*5 +: 5];
             wire [LEVEL_WIDTH-1:0] level = fifo_level[lane*LEVEL_WIDTH +: LEVEL_WIDTH];
             wire push = s_valid[lane] && s_ready[lane];
             wire pop = head_valid[lane] && head_ready[lane];
+            wire frame_available, frame_available_next;
             wire [LEVEL_WIDTH-1:0] level_next = level +
                 {{(LEVEL_WIDTH-1){1'b0}}, push} - {{(LEVEL_WIDTH-1){1'b0}}, pop};
             if (ADMISSION < 1 || ADMISSION > 16) begin : unsupported_admission
@@ -56,11 +64,13 @@ module stream_arbiter #(
             end
             // Admission is checked only when selecting a new frame. The mux
             // continues to use nonempty, independently of the threshold.
-            assign eligible[lane] = !rst && (level >= ADMISSION);
-            assign eligible_next[lane] = !rst && (level_next >= ADMISSION);
+            assign eligible[lane] = PACKET_MODE ? frame_available : (!rst && (level >= ADMISSION));
+            assign eligible_next[lane] = PACKET_MODE ? frame_available_next : (!rst && (level_next >= ADMISSION));
             stream_fifo #(
                 .DATA_WIDTH (DATA_WIDTH),
-                .FIFO_DEPTH (FIFO_DEPTH)
+                .FIFO_DEPTH (FIFO_DEPTH),
+                .PACKET_MODE (PACKET_MODE),
+                .MAX_FRAME_BEATS (MAX_FRAME_BEATS)
             ) fifo (
                 .clk            (clk),
                 .rst            (rst),
@@ -74,7 +84,9 @@ module stream_arbiter #(
                 .m_ready        (head_ready[lane]),
                 .level          (fifo_level[lane*LEVEL_WIDTH +: LEVEL_WIDTH]),
                 .next_valid     (),
-                .protocol_error (protocol_error[lane])
+                .protocol_error (protocol_error[lane]),
+                .frame_available (frame_available),
+                .frame_available_next (frame_available_next)
             );
         end
     endgenerate

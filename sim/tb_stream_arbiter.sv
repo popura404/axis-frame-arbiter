@@ -8,6 +8,8 @@ module tb_stream_arbiter #(
     parameter integer AXIS = 0,
     parameter integer EXTERNAL = 0,
     parameter integer FRAME_FIFO = 0,
+    parameter integer PACKET_MODE = 0,
+    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH,
     parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 );
     localparam SOURCE_WIDTH = $clog2(PORTS);
@@ -41,7 +43,8 @@ module tb_stream_arbiter #(
         end else if (AXIS) begin : axi_interface
             axis_stream_arbiter #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
-                .ADMISSION_LEVELS(ADMISSION_LEVELS)
+                .ADMISSION_LEVELS(ADMISSION_LEVELS), .PACKET_MODE(PACKET_MODE),
+                .MAX_FRAME_BEATS(MAX_FRAME_BEATS)
             ) dut (
                 .aclk(clk), .aresetn(!rst), .mode_rr(mode_rr),
                 .s_axis_tdata(s_data), .s_axis_tlast(s_last),
@@ -53,7 +56,8 @@ module tb_stream_arbiter #(
         end else begin : core_interface
             stream_arbiter #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
-                .ADMISSION_LEVELS(ADMISSION_LEVELS)
+                .ADMISSION_LEVELS(ADMISSION_LEVELS), .PACKET_MODE(PACKET_MODE),
+                .MAX_FRAME_BEATS(MAX_FRAME_BEATS)
             ) dut (.*);
         end
     endgenerate
@@ -65,6 +69,10 @@ module tb_stream_arbiter #(
     integer accepted, delivered, discarded = 0, grand_delivered = 0, grand_accepted = 0;
     integer frame_time [0:PORTS-1][0:4095];
     integer in_frames [0:PORTS-1], out_started [0:PORTS-1];
+    integer input_frame_beat [0:PORTS-1];
+    localparam PACKET_PLAN_SIZE = 4096;
+    reg packet_tail [0:PORTS-1][0:PACKET_PLAN_SIZE-1];
+    integer packet_end [0:PORTS-1];
     integer win_frames [0:PORTS-1], win_backpressure [0:PORTS-1], win_full [0:PORTS-1], peak [0:PORTS-1];
     integer wait_count [0:PORTS-1], wait_sum [0:PORTS-1], wait_max [0:PORTS-1];
     integer win_cycles = 0, win_beats = 0, win_gaps = 0, win_source_gaps = 0, win_stalls = 0;
@@ -87,6 +95,18 @@ module tb_stream_arbiter #(
 
     function automatic integer admission_level(input integer lane);
         admission_level = ADMISSION_LEVELS[lane*5 +: 5];
+    endfunction
+
+    // Search accepted, unconsumed transactions for a complete head frame.
+    // This deliberately does not reproduce the DUT's completion counter.
+    function automatic bit eligible(input integer lane);
+        integer n;
+        begin
+            eligible = !PACKET_MODE && queued[lane] >= admission_level(lane);
+            if (PACKET_MODE)
+                for (n = 0; n < queued[lane]; n = n + 1)
+                    if (queue_data[lane][(head[lane]+n)%QSIZE][DATA_WIDTH]) eligible = 1;
+        end
     endfunction
 
     function automatic [DATA_WIDTH-1:0] payload(input integer src, input integer index);
@@ -120,6 +140,7 @@ module tb_stream_arbiter #(
                     frames[i] = 0;
                     in_frames[i] = 0;
                     out_started[i] = 0;
+                    input_frame_beat[i] = 0;
                     contract_misses[i] = 0;
                 end
                 accepted = 0;
@@ -178,7 +199,7 @@ module tb_stream_arbiter #(
                     // This set is independent of the DUT's FIFO flags or grant state.
                     for (offset = 0; offset < PORTS; offset = offset + 1) begin
                         i = mode ? ((ref_cursor + offset) % PORTS) : offset;
-                        if (candidate < 0 && queued[i] >= admission_level(i)) candidate = i;
+                        if (candidate < 0 && eligible(i)) candidate = i;
                     end
                 end else if (!EXTERNAL) begin
                     check(m_valid === (queued[ref_grant] != 0),
@@ -204,7 +225,10 @@ module tb_stream_arbiter #(
                     check(queued[src] > 0, "output has no accepted input");
                     check({m_last, m_data} === queue_data[src][head[src]], "data/LAST mismatch or source reordering");
                     check(m_data[DATA_WIDTH-1 -: SOURCE_WIDTH] == src, "payload source identifier mismatch");
-                    if (!expected_error) begin
+                    if (PACKET_MODE) begin
+                        if (frame_beat != 0) check(src == frame_source, "packet output switched sources within a frame");
+                        check(frame_beat < MAX_FRAME_BEATS, "output packet exceeded MAX_FRAME_BEATS");
+                    end else if (!expected_error) begin
                         if (frame_beat != 0) check(src == frame_source, "output switched sources within a frame");
                         check(m_data[3:0] == frame_beat, "output frame interleaved or beat order wrong");
                         check(m_last == (frame_beat == 15), "output frame length/LAST wrong");
@@ -239,7 +263,7 @@ module tb_stream_arbiter #(
                 for (i = 0; i < PORTS; i = i + 1)
                     if (s_valid[i] && s_ready[i]) begin
                         check(queued[i] < QSIZE-1, "input accepted beyond storage capacity");
-                        if ((issued[i] % 16) == 0) begin
+                        if (PACKET_MODE ? input_frame_beat[i] == 0 : (issued[i] % 16) == 0) begin
                             frame_time[i][in_frames[i] % 4096] = cycle;
                             in_frames[i] = in_frames[i] + 1;
                         end
@@ -249,19 +273,20 @@ module tb_stream_arbiter #(
                         tail[i] = (tail[i] + 1) % QSIZE;
                         queued[i] = queued[i] + 1;
                         issued[i] = issued[i] + 1;
+                        input_frame_beat[i] = s_last[i] ? 0 : input_frame_beat[i] + 1;
                         accepted = accepted + 1;
                     end
 
                 // At a completed frame boundary, the next grant uses accepted
                 // transactions AFTER both this edge's read and writes. A sole
-                // tail cannot regrant its now-empty source; a newly accepted
-                // first beat may immediately compete. Idle selection above
+                // tail cannot regrant its now-empty source. A new first beat
+                // (fixed mode) or completed packet may immediately compete. Idle selection above
                 // deliberately retains the existing registered startup cycle.
                 if (tail_transfer && !EXTERNAL) begin
                     candidate = -1;
                     for (offset = 0; offset < PORTS; offset = offset + 1) begin
                         i = mode ? ((ref_cursor + offset) % PORTS) : offset;
-                        if (candidate < 0 && queued[i] >= admission_level(i)) candidate = i;
+                        if (candidate < 0 && eligible(i)) candidate = i;
                     end
                     ref_grant = candidate;
                 end
@@ -284,7 +309,7 @@ module tb_stream_arbiter #(
             for (i = 0; i < PORTS; i = i + 1) begin
                 s_valid[i] = (issued[i] < limit[i]) && (issue_mask[i] || input_stalled[i]);
                 s_data[i*DATA_WIDTH +: DATA_WIDTH] = payload(i, issued[i]);
-                s_last[i] = (issued[i] % 16) == 15;
+                s_last[i] = PACKET_MODE ? packet_tail[i][issued[i] % PACKET_PLAN_SIZE] : (issued[i] % 16) == 15;
             end
         end
     endtask
@@ -319,7 +344,10 @@ module tb_stream_arbiter #(
             mode_rr = mode;
             s_valid = 0;
             m_ready = 0;
-            for (i = 0; i < PORTS; i = i + 1) limit[i] = 0;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                limit[i] = 0;
+                packet_end[i] = 0;
+            end
             tick();
             tick();
             check(!m_valid && s_ready == 0 && protocol_error == 0 && fifo_level == 0, "reset failed to clear state");
@@ -795,6 +823,7 @@ module tb_stream_arbiter #(
     endtask
 
     `include "sim/study_tasks.svh"
+    `include "sim/packet_tasks.svh"
 
     integer init_i;
     // A deadlocked design must fail rather than leave a batch regression hung.
@@ -821,9 +850,11 @@ module tb_stream_arbiter #(
             $fdisplay(events, "cycle,event,source,data_or_wait,last,measured");
         end
         check(mode == 0 || mode == 1, "MODE must be 0 or 1");
+        check(PACKET_MODE == (test_case == "packet"), "PACKET_MODE and packet CASE must agree");
         if (EXTERNAL) check(mode == 1 && test_case == "study", "external reference is RR study only");
         if (test_case == "directed") directed();
         else if (test_case == "admission") admission();
+        else if (test_case == "packet") packet_tests();
         else if (test_case == "study") study();
         else if (test_case == "random") randomized();
         else if (test_case == "negative") negative();
@@ -831,8 +862,8 @@ module tb_stream_arbiter #(
         else $fatal(1, "unknown CASE=%s", test_case);
         check(grand_accepted == grand_delivered + discarded, "lifetime accepted/delivered/discarded mismatch");
         if (events) $fclose(events);
-        $display("PASS stream PORTS=%0d WIDTH=%0d DEPTH=%0d AXIS=%0d MODE=%0d CASE=%s epochs=%0d beats=%0d discarded=%0d stalls=%0d tail_stalls=%0d source_gaps=%0d full_cycles=%0d",
-                 PORTS, DATA_WIDTH, FIFO_DEPTH, AXIS, mode, test_case, tests, grand_delivered, discarded, stall_cycles, tail_stalls, source_gaps, full_cycles);
+        $display("PASS stream PORTS=%0d WIDTH=%0d DEPTH=%0d AXIS=%0d PACKET=%0d MAX=%0d MODE=%0d CASE=%s epochs=%0d beats=%0d discarded=%0d stalls=%0d tail_stalls=%0d source_gaps=%0d full_cycles=%0d",
+                 PORTS, DATA_WIDTH, FIFO_DEPTH, AXIS, PACKET_MODE, MAX_FRAME_BEATS, mode, test_case, tests, grand_delivered, discarded, stall_cycles, tail_stalls, source_gaps, full_cycles);
         $finish;
     end
 endmodule

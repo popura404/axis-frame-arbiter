@@ -1,12 +1,14 @@
 `timescale 1ns/1ps
-// N 路独立 AXI4-Stream 的展平接口，固定 16 拍、每拍全部字节有效。
+// Flattened AXIS interface: fixed-16 or bounded complete frames, full-byte beats.
 // TKEEP/TSTRB 省略；输出 TID 由输入端口号生成，不接收输入 TID。
 // aresetn 与 aclk 同步，至少跨一个上升沿；本层不引入额外流水延迟。
 module axis_stream_arbiter #(
     parameter integer PORTS = 4,
     parameter integer DATA_WIDTH = 32,
     parameter integer FIFO_DEPTH = 64,
-    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
+    parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}},
+    parameter integer PACKET_MODE = 0,
+    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH
 ) (
     input  wire                                  aclk,
     input  wire                                  aresetn,
@@ -31,7 +33,9 @@ module axis_stream_arbiter #(
         .PORTS      (PORTS),
         .DATA_WIDTH (DATA_WIDTH),
         .FIFO_DEPTH (FIFO_DEPTH),
-        .ADMISSION_LEVELS (ADMISSION_LEVELS)
+        .ADMISSION_LEVELS (ADMISSION_LEVELS),
+        .PACKET_MODE (PACKET_MODE),
+        .MAX_FRAME_BEATS (MAX_FRAME_BEATS)
     ) core (
         .clk            (aclk),
         .rst            (!aresetn),

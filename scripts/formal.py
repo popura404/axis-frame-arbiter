@@ -76,20 +76,30 @@ def result_status(record, mode, text, underflow_line, expected_covers):
     return "FAIL" if "Status: FAILED" in text else "TOOL_ERROR"
 
 
-def scheduler_checks(args, env):
-    folder = BUILD / "scheduler"
+def module_checks(args, env):
+    packet = args.target == "packet"
+    folder = BUILD / args.target
     folder.mkdir(parents=True, exist_ok=True)
-    checks = list(dict.fromkeys(args.check or ["bmc", "induction", "cover"]))
-    if "negative" in checks or args.gap or args.data:
-        raise SystemExit("scheduler supports bmc/induction/cover, without gap or data overrides")
-    sources = [ROOT / "rtl/frame_arbiter.sv", ROOT / "formal/scheduler.sv"]
-    report = {"configuration": {"target": "frame_arbiter", "ports": 2, "steps": args.depth},
-              "scope": "interface-level grant hold and eligible selection; arbitrary availability/frame_done, fixed reset-sampled mode; does not prove parent eligibility, priority order, mode capture, or frame completion",
+    checks = list(dict.fromkeys(args.check or (["bmc", "cover"] if packet else ["bmc", "induction", "cover"])))
+    if "negative" in checks or (packet and "induction" in checks) or args.gap or args.data:
+        raise SystemExit("packet supports bmc/cover; scheduler supports bmc/induction/cover; neither takes gap/data overrides")
+    sources = ([*sorted((ROOT / "rtl").glob("*.sv")), ROOT / "formal/packet.sv"] if packet else
+               [ROOT / "rtl/frame_arbiter.sv", ROOT / "formal/scheduler.sv"])
+    configuration = ({"target": "stream_arbiter", "ports": 2, "width": 32, "fifo_depth": 16,
+                      "packet_mode": 1, "max_frame_beats": 3, "reset": "initial only", "steps": args.depth} if packet else
+                     {"target": "frame_arbiter", "ports": 2, "steps": args.depth})
+    scope = ("bounded pre-registered packets: source0 legal 2-beat frame then 3 beats without LAST and a held pending tail; source1 legal 3-beat frame after fault; READY=0 for five-beat preload then arbitrary; interface-only payload/LAST/ordering/occupancy/stability/quarantine checks; no arbitrary-traffic or unbounded proof" if packet else
+             "interface-level grant hold and eligible selection; arbitrary availability/frame_done, fixed reset-sampled mode; does not prove parent eligibility, priority order, mode capture, or frame completion")
+    report = {"configuration": configuration, "scope": scope,
               "versions": {name: subprocess.check_output(cmd, env=env, text=True).strip() for name, cmd in
                            (("yosys", ["yosys", "-V"]), ("z3", ["z3", "--version"]))},
               "sha256": {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
               "jobs": []}
-    command = "read_verilog -formal -sv rtl/frame_arbiter.sv formal/scheduler.sv; prep -top formal_scheduler; flatten; opt; dffunmap; write_smt2 -wires build/formal/scheduler/design.smt2"
+    top = "formal_packet" if packet else "formal_scheduler"
+    smt = (folder / "design.smt2").relative_to(ROOT).as_posix()
+    command = "read_verilog -formal -sv " + " ".join(p.relative_to(ROOT).as_posix() for p in sources)
+    command += f"; prep -top {top}; flatten; " + ("memory_map; " if packet else "")
+    command += f"opt; dffunmap; write_smt2 -wires {smt}"
     compiled = run(["yosys", "-Q", "-T", "-p", command], folder / "compile.log", env, args.timeout)
     report["compile"] = compiled
     okay = compiled["returncode"] == 0 and not compiled["wall_timeout"]
@@ -100,13 +110,13 @@ def scheduler_checks(args, env):
             for old_trace in folder.glob(f"{check}*.vcd"):
                 old_trace.unlink()
             command = ["yosys-smtbmc", "-s", "z3", "--unroll", "--noprogress", "-t", str(args.depth),
-                       *extra, "--dump-vcd", trace.relative_to(ROOT).as_posix(), "build/formal/scheduler/design.smt2"]
+                       *extra, "--dump-vcd", trace.relative_to(ROOT).as_posix(), smt]
             job = run(command, folder / f"{check}.log", env, args.timeout)
             job["check"] = check
             job["status"] = result_status(job, check, (ROOT / job["log"]).read_text(), 0, 2)
             okay &= job["status"] == "PASS"
             report["jobs"].append(job)
-            print(f"scheduler {check}: {job['status']}", flush=True)
+            print(f"{args.target} {check}: {job['status']}", flush=True)
     report["all_requested_checks_met"] = okay
     (folder / "results.json").write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
     return okay
@@ -114,17 +124,19 @@ def scheduler_checks(args, env):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", choices=("admission", "scheduler"), default="admission")
+    parser.add_argument("--target", choices=("admission", "scheduler", "packet"), default="admission")
     parser.add_argument("--gap", type=int, action="append", choices=(1, 2, 4, 8), help="default: 2")
-    parser.add_argument("--depth", type=int, default=48, help="SMTBMC time steps, including reset")
+    parser.add_argument("--depth", type=int, help="SMTBMC steps including reset; default: packet 32, others 48")
     parser.add_argument("--timeout", type=int, default=90, help="wall seconds per tool invocation")
     parser.add_argument("--check", action="append", choices=("bmc", "cover", "negative", "induction"))
     parser.add_argument("--ready", choices=("always", "arbitrary"), default="always",
-                        help="default: continuous downstream READY; arbitrary retains all backpressure patterns")
+                        help="admission only: continuous READY by default; arbitrary retains all backpressure patterns")
     parser.add_argument("--scenario", choices=("handoff", "general"), default="handoff",
-                        help="handoff fixes only the prefix setup; general leaves all legal arrivals free")
-    parser.add_argument("--data", action="store_true", help="also check deterministic 32-bit sequence tags")
+                        help="admission only: handoff fixes prefix setup; general leaves legal arrivals free")
+    parser.add_argument("--data", action="store_true", help="admission only: also check deterministic 32-bit sequence tags")
     args = parser.parse_args()
+    if args.depth is None:
+        args.depth = 32 if args.target == "packet" else 48
     if args.depth < 2 or args.timeout < 1:
         parser.error("depth >= 2 and timeout >= 1 are required")
     gaps = list(dict.fromkeys(args.gap or [2]))
@@ -132,8 +144,8 @@ def main():
     if args.target == "admission" and checks == ["negative"] and gaps == [1]:
         parser.error("G=1 would require illegal H=0; no valid RTL underflow experiment exists")
     env = environment()
-    if args.target == "scheduler":
-        raise SystemExit(0 if scheduler_checks(args, env) else 1)
+    if args.target in ("scheduler", "packet"):
+        raise SystemExit(0 if module_checks(args, env) else 1)
     BUILD.mkdir(parents=True, exist_ok=True)
     rtl = sorted((ROOT / "rtl").glob("*.sv"))
     harness = ROOT / "formal" / "admission.sv"

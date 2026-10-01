@@ -34,6 +34,10 @@ def main():
     parser.add_argument("--width", type=int, choices=[32, 64], default=32)
     parser.add_argument("--depth", type=int, choices=[16, 64], default=64)
     parser.add_argument("--admission", default="1", help="static threshold(s), lane 0 first; scalar repeats")
+    parser.add_argument("--packet-mode", type=int, choices=[0, 1], default=0,
+                        help="local core/AXIS only: admit complete variable-length frames")
+    parser.add_argument("--max-frame-beats", type=int,
+                        help="local core/AXIS only: packet length limit, defaults to FIFO depth")
     parser.add_argument("--frame-fifo", type=int, choices=[0, 1], default=0,
                         help="external reference only: word (0) or frame (1) FIFO")
     args = parser.parse_args()
@@ -41,6 +45,14 @@ def main():
         levels = admission_levels(args.admission, args.ports)
     except ValueError as error:
         parser.error(str(error))
+    local_top = args.top in ("stream_arbiter", "axis_stream_arbiter")
+    if not local_top and (args.packet_mode or args.max_frame_beats is not None):
+        parser.error("--packet-mode/--max-frame-beats apply only to the local core and AXIS tops")
+    max_frame_beats = args.depth if args.max_frame_beats is None else args.max_frame_beats
+    if not 1 <= max_frame_beats <= args.depth:
+        parser.error("--max-frame-beats must be in 1..FIFO_DEPTH")
+    if args.packet_mode and any(level != 1 for level in levels):
+        parser.error("packet mode requires --admission 1 on every lane")
     if args.top == "axis_external":
         if any(level != 1 for level in levels):
             parser.error("external reference has no configurable admission threshold")
@@ -55,10 +67,14 @@ def main():
     configuration = f"p{args.ports}-w{args.width}-d{args.depth}"
     if any(level != 1 for level in levels):
         configuration += "-h" + "-".join(map(str, levels))
+    if args.packet_mode:
+        configuration += f"-packet-m{max_frame_beats}"
     if args.top == "axis_external":
         configuration += f"-frame{args.frame_fifo}"
     tcl_args = [args.top, args.context, str(args.ports), str(args.width), str(args.depth),
                 ",".join(map(str, levels)), str(args.frame_fifo)]
+    if local_top:
+        tcl_args += [str(args.packet_mode), str(max_frame_beats)]
     executable = os.environ.get("VIVADO") or shutil.which("vivado") or shutil.which("vivado.bat")
     if not executable:
         for path in (Path("/mnt/e/AMDDesignTools/2025.2/Vivado/bin/vivado.bat"),
