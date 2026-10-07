@@ -1,20 +1,23 @@
 `timescale 1ns/1ps
-// 单路输入封装：将 DATA/LAST 一起缓存，协议监测独立于存储通路。
+// Per-lane storage of DATA/LAST and optional KEEP, with frame admission metadata.
 module stream_fifo #(
     parameter integer DATA_WIDTH = 32,
     parameter integer FIFO_DEPTH = 64,
     parameter integer PACKET_MODE = 0,
-    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH
+    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH,
+    parameter integer KEEP_ENABLE = 0
 ) (
     input  wire        clk,
     input  wire        rst,
 
     input  wire [DATA_WIDTH-1:0] s_data,
+    input  wire [DATA_WIDTH/8-1:0] s_keep,
     input  wire        s_last,
     input  wire        s_valid,
     output wire        s_ready,
 
     output wire [DATA_WIDTH-1:0] m_data,
+    output wire [DATA_WIDTH/8-1:0] m_keep,
     output wire        m_last,
     output wire        m_valid,
     input  wire        m_ready,
@@ -28,17 +31,30 @@ module stream_fifo #(
     wire fifo_ready, frame_bad, frame_fault;
     wire accepting = !PACKET_MODE || !frame_fault;
     assign s_ready = fifo_ready && accepting;
+    localparam integer KEEP_WIDTH = DATA_WIDTH / 8;
+    localparam integer STORAGE_WIDTH = DATA_WIDTH + 1 + (KEEP_ENABLE ? KEEP_WIDTH : 0);
+    wire [STORAGE_WIDTH-1:0] storage_in, storage_out;
+    generate
+        if (KEEP_ENABLE) begin : byte_qualifiers
+            assign storage_in = {s_keep, s_last, s_data};
+            assign {m_keep, m_last, m_data} = storage_out;
+        end else begin : full_words
+            assign storage_in = {s_last, s_data};
+            assign {m_last, m_data} = storage_out;
+            assign m_keep = {KEEP_WIDTH{1'b1}};
+        end
+    endgenerate
 
     sync_fifo #(
-        .WIDTH (DATA_WIDTH + 1),
+        .WIDTH (STORAGE_WIDTH),
         .DEPTH (FIFO_DEPTH)
     ) fifo (
         .clk        (clk),
         .rst        (rst),
-        .s_data     ({s_last, s_data}),
+        .s_data     (storage_in),
         .s_valid    (s_valid && accepting),
         .s_ready    (fifo_ready),
-        .m_data     ({m_last, m_data}),
+        .m_data     (storage_out),
         .m_valid    (m_valid),
         .m_ready    (m_ready),
         .level      (level),
@@ -48,11 +64,13 @@ module stream_fifo #(
     stream_protocol_checker #(
         .DATA_WIDTH (DATA_WIDTH),
         .PACKET_MODE (PACKET_MODE),
-        .MAX_FRAME_BEATS (MAX_FRAME_BEATS)
+        .MAX_FRAME_BEATS (MAX_FRAME_BEATS),
+        .KEEP_ENABLE (KEEP_ENABLE)
     ) protocol_monitor (
         .clk            (clk),
         .rst            (rst),
         .data           (s_data),
+        .keep           (s_keep),
         .last           (s_last),
         .valid          (s_valid),
         .ready          (s_ready),

@@ -44,11 +44,11 @@ module formal_admission #(
 
     stream_arbiter #(
         .PORTS(2), .DATA_WIDTH(32), .FIFO_DEPTH(16),
-        .ADMISSION_LEVELS({5'(H), 5'(H)})
+        .ADMISSION_LEVELS({5'(H), 5'(H)}), .KEEP_ENABLE(0)
     ) dut (
         .clk(clk), .rst(rst), .mode_rr(1'b1),
-        .s_data(s_data), .s_last(s_last), .s_valid(s_valid), .s_ready(s_ready),
-        .m_data(m_data), .m_last(m_last), .m_valid(m_valid), .m_ready(m_ready),
+        .s_data(s_data), .s_last(s_last), .s_keep(8'hff), .s_valid(s_valid), .s_ready(s_ready),
+        .m_data(m_data), .m_last(m_last), .m_keep(), .m_valid(m_valid), .m_ready(m_ready),
         .m_source(m_source), .protocol_error(protocol_error), .fifo_level(fifo_level)
     );
 

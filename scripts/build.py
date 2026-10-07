@@ -38,6 +38,8 @@ def main():
                         help="local core/AXIS only: admit complete variable-length frames")
     parser.add_argument("--max-frame-beats", type=int,
                         help="local core/AXIS only: packet length limit, defaults to FIFO depth")
+    parser.add_argument("--keep-enable", type=int, choices=[0, 1], default=0,
+                        help="local packet mode only: preserve and check byte-valid masks")
     parser.add_argument("--frame-fifo", type=int, choices=[0, 1], default=0,
                         help="external reference only: word (0) or frame (1) FIFO")
     args = parser.parse_args()
@@ -48,6 +50,8 @@ def main():
     local_top = args.top in ("stream_arbiter", "axis_stream_arbiter")
     if not local_top and (args.packet_mode or args.max_frame_beats is not None):
         parser.error("--packet-mode/--max-frame-beats apply only to the local core and AXIS tops")
+    if args.keep_enable and (not local_top or not args.packet_mode):
+        parser.error("--keep-enable requires packet mode on the local core or AXIS top")
     max_frame_beats = args.depth if args.max_frame_beats is None else args.max_frame_beats
     if not 1 <= max_frame_beats <= args.depth:
         parser.error("--max-frame-beats must be in 1..FIFO_DEPTH")
@@ -69,12 +73,14 @@ def main():
         configuration += "-h" + "-".join(map(str, levels))
     if args.packet_mode:
         configuration += f"-packet-m{max_frame_beats}"
+    if args.keep_enable:
+        configuration += "-keep1"
     if args.top == "axis_external":
         configuration += f"-frame{args.frame_fifo}"
     tcl_args = [args.top, args.context, str(args.ports), str(args.width), str(args.depth),
                 ",".join(map(str, levels)), str(args.frame_fifo)]
     if local_top:
-        tcl_args += [str(args.packet_mode), str(max_frame_beats)]
+        tcl_args += [str(args.packet_mode), str(max_frame_beats), str(args.keep_enable)]
     executable = os.environ.get("VIVADO") or shutil.which("vivado") or shutil.which("vivado.bat")
     if not executable:
         for path in (Path("/mnt/e/AMDDesignTools/2025.2/Vivado/bin/vivado.bat"),

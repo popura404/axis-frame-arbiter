@@ -10,20 +10,24 @@ module tb_stream_arbiter #(
     parameter integer FRAME_FIFO = 0,
     parameter integer PACKET_MODE = 0,
     parameter integer MAX_FRAME_BEATS = FIFO_DEPTH,
+    parameter integer KEEP_ENABLE = 0,
     parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 );
     localparam SOURCE_WIDTH = $clog2(PORTS);
     localparam LEVEL_WIDTH = $clog2(FIFO_DEPTH) + 1;
+    localparam KEEP_WIDTH = DATA_WIDTH/8;
     localparam [LEVEL_WIDTH-1:0] FULL_LEVEL = FIFO_DEPTH;
     reg clk = 0;
     always #5 clk = ~clk;
     reg rst = 1;
     reg mode_rr = 0;
     reg [PORTS*DATA_WIDTH-1:0] s_data = 0;
+    reg [PORTS*KEEP_WIDTH-1:0] s_keep = {PORTS*KEEP_WIDTH{1'b1}};
     reg [PORTS-1:0] s_last = 0, s_valid = 0;
     wire [PORTS-1:0] s_ready, protocol_error;
     wire [PORTS*LEVEL_WIDTH-1:0] fifo_level;
     wire [DATA_WIDTH-1:0] m_data;
+    wire [KEEP_WIDTH-1:0] m_keep;
     wire m_last, m_valid;
     reg m_ready = 0;
     wire [SOURCE_WIDTH-1:0] m_source;
@@ -40,14 +44,16 @@ module tb_stream_arbiter #(
             );
             assign fifo_level = 0; // External storage has different capacity/pipeline.
             assign protocol_error = 0; // Input legality is checked by this testbench.
+            assign m_keep = {KEEP_WIDTH{1'b1}};
         end else if (AXIS) begin : axi_interface
             axis_stream_arbiter #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
                 .ADMISSION_LEVELS(ADMISSION_LEVELS), .PACKET_MODE(PACKET_MODE),
-                .MAX_FRAME_BEATS(MAX_FRAME_BEATS)
+                .MAX_FRAME_BEATS(MAX_FRAME_BEATS), .KEEP_ENABLE(KEEP_ENABLE)
             ) dut (
                 .aclk(clk), .aresetn(!rst), .mode_rr(mode_rr),
                 .s_axis_tdata(s_data), .s_axis_tlast(s_last),
+                .s_axis_tkeep(s_keep), .m_axis_tkeep(m_keep),
                 .s_axis_tvalid(s_valid), .s_axis_tready(s_ready),
                 .m_axis_tdata(m_data), .m_axis_tlast(m_last),
                 .m_axis_tvalid(m_valid), .m_axis_tready(m_ready),
@@ -57,28 +63,33 @@ module tb_stream_arbiter #(
             stream_arbiter #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
                 .ADMISSION_LEVELS(ADMISSION_LEVELS), .PACKET_MODE(PACKET_MODE),
-                .MAX_FRAME_BEATS(MAX_FRAME_BEATS)
+                .MAX_FRAME_BEATS(MAX_FRAME_BEATS), .KEEP_ENABLE(KEEP_ENABLE)
             ) dut (.*);
         end
     endgenerate
 
     localparam QSIZE = FIFO_DEPTH + (EXTERNAL ? 5 : 1);
     reg [DATA_WIDTH:0] queue_data [0:PORTS-1][0:QSIZE-1];
+    reg [KEEP_WIDTH-1:0] queue_keep [0:PORTS-1][0:QSIZE-1];
+    reg queue_good_end [0:PORTS-1][0:QSIZE-1];
+    reg [PORTS-1:0] input_frame_fault = 0;
     integer head [0:PORTS-1], tail [0:PORTS-1], queued [0:PORTS-1];
     integer issued [0:PORTS-1], limit [0:PORTS-1], frames [0:PORTS-1];
     integer accepted, delivered, discarded = 0, grand_delivered = 0, grand_accepted = 0;
+    integer accepted_bytes = 0, delivered_bytes = 0;
     integer frame_time [0:PORTS-1][0:4095];
     integer in_frames [0:PORTS-1], out_started [0:PORTS-1];
     integer input_frame_beat [0:PORTS-1];
     localparam PACKET_PLAN_SIZE = 4096;
     reg packet_tail [0:PORTS-1][0:PACKET_PLAN_SIZE-1];
+    reg [KEEP_WIDTH-1:0] packet_keep [0:PORTS-1][0:PACKET_PLAN_SIZE-1];
     integer packet_end [0:PORTS-1];
     integer win_frames [0:PORTS-1], win_backpressure [0:PORTS-1], win_full [0:PORTS-1], peak [0:PORTS-1];
     integer wait_count [0:PORTS-1], wait_sum [0:PORTS-1], wait_max [0:PORTS-1];
     integer win_cycles = 0, win_beats = 0, win_gaps = 0, win_source_gaps = 0, win_stalls = 0;
     reg measuring = 0, expected_error = 0;
     reg [PORTS-1:0] input_stalled = 0, issue_mask = {PORTS{1'b1}};
-    reg [DATA_WIDTH:0] input_held [0:PORTS-1];
+    reg [DATA_WIDTH+KEEP_WIDTH:0] input_held [0:PORTS-1];
     integer violation_count = 0, seed = 1, events = 0;
     reg [31:0] rng = 1;
     string event_path;
@@ -86,7 +97,7 @@ module tb_stream_arbiter #(
     integer mode = 0, tests = 0, source_gaps = 0, stall_cycles = 0;
     integer full_cycles = 0, tail_stalls = 0;
     reg stalled = 0;
-    reg [DATA_WIDTH+SOURCE_WIDTH:0] stalled_payload;
+    reg [DATA_WIDTH+SOURCE_WIDTH+KEEP_WIDTH:0] stalled_payload;
     string test_case = "directed";
     integer gap = 1, expect_starve = 0, contract_violations = 0;
     integer contract_misses [0:PORTS-1];
@@ -105,7 +116,28 @@ module tb_stream_arbiter #(
             eligible = !PACKET_MODE && queued[lane] >= admission_level(lane);
             if (PACKET_MODE)
                 for (n = 0; n < queued[lane]; n = n + 1)
-                    if (queue_data[lane][(head[lane]+n)%QSIZE][DATA_WIDTH]) eligible = 1;
+                    if (queue_good_end[lane][(head[lane]+n)%QSIZE]) eligible = 1;
+        end
+    endfunction
+
+    // Byte-by-byte reference for this interface's packed low-byte subset.
+    function automatic bit legal_keep(input bit last, input reg [KEEP_WIDTH-1:0] keep);
+        integer byte_index;
+        bit zero_seen, data_seen;
+        begin
+            legal_keep = 1;
+            zero_seen = 0;
+            data_seen = 0;
+            for (byte_index = 0; byte_index < KEEP_WIDTH; byte_index = byte_index+1) begin
+                if (keep[byte_index] === 1'b1) begin
+                    data_seen = 1;
+                    if (zero_seen) legal_keep = 0;
+                end else if (keep[byte_index] === 1'b0) begin
+                    zero_seen = 1;
+                    if (!last) legal_keep = 0;
+                end else legal_keep = 0;
+            end
+            if (!data_seen) legal_keep = 0;
         end
     endfunction
 
@@ -115,6 +147,9 @@ module tb_stream_arbiter #(
             // Every 32-bit chunk varies; a 64-bit truncation cannot pass unnoticed.
             for (word_index = 0; word_index < DATA_WIDTH/32; word_index = word_index + 1)
                 payload[word_index*32 +: 32] = index ^ (32'h9e3779b9 * word_index);
+            if (KEEP_ENABLE)
+                for (word_index = 0; word_index < KEEP_WIDTH; word_index = word_index+1)
+                    payload[word_index*8 +: 8] = index + 17*src + 29*word_index;
             payload[DATA_WIDTH-1 -: SOURCE_WIDTH] = src;
         end
     endfunction
@@ -126,8 +161,9 @@ module tb_stream_arbiter #(
 
     // Called on the sampling edge, before nonblocking DUT state updates.
     task automatic sample;
-        integer i, candidate, offset, src, wait_time;
+        integer i, candidate, offset, src, wait_time, byte_index;
         reg tail_transfer;
+        reg [KEEP_WIDTH-1:0] accepted_keep;
         begin
             cycle = cycle + 1;
             if (rst) begin
@@ -145,23 +181,29 @@ module tb_stream_arbiter #(
                 end
                 accepted = 0;
                 delivered = 0;
+                accepted_bytes = 0;
+                delivered_bytes = 0;
                 ref_grant = -1;
                 ref_cursor = 0;
                 frame_beat = 0;
                 frame_source = 0;
                 stalled = 0;
                 input_stalled = 0;
+                input_frame_fault = 0;
             end else begin
                 if (test_case == "study") study_sample();
                 if (!expected_error) check(protocol_error === {PORTS{1'b0}}, "unexpected input protocol error");
                 if (measuring) win_cycles = win_cycles + 1;
                 for (i = 0; i < PORTS; i = i + 1) begin
-                    if (input_stalled[i] && (!s_valid[i] || {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]} !== input_held[i])) begin
+                    accepted_keep = KEEP_ENABLE ? s_keep[i*KEEP_WIDTH +: KEEP_WIDTH] : {KEEP_WIDTH{1'b1}};
+                    if (input_stalled[i] && (!s_valid[i] || {s_last[i], accepted_keep, s_data[i*DATA_WIDTH +: DATA_WIDTH]} !== input_held[i])) begin
                         violation_count = violation_count + 1;
                         check(expected_error, "source violated ready/valid protocol");
                     end
                     input_stalled[i] = s_valid[i] && !s_ready[i];
-                    input_held[i] = {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]};
+                    input_held[i] = {s_last[i], accepted_keep, s_data[i*DATA_WIDTH +: DATA_WIDTH]};
+                    if (PACKET_MODE && input_frame_fault[i])
+                        check(!s_ready[i], "faulted input lane resumed acceptance before reset");
                     // Independent ready-opportunity contract monitor. A source
                     // may violate this deadline while remaining AXIS-correct.
                     // issued[] counts accepted transactions, never DUT state.
@@ -182,10 +224,10 @@ module tb_stream_arbiter #(
                     end
                 end
                 if (stalled)
-                    check(m_valid && {m_source, m_last, m_data} === stalled_payload,
+                    check(m_valid && {m_source, m_last, m_keep, m_data} === stalled_payload,
                           "output changed or VALID dropped during backpressure");
                 stalled = m_valid && !m_ready;
-                stalled_payload = {m_source, m_last, m_data};
+                stalled_payload = {m_source, m_last, m_keep, m_data};
                 if (stalled) begin
                     stall_cycles = stall_cycles + 1;
                     if (measuring) win_stalls = win_stalls + 1;
@@ -223,8 +265,16 @@ module tb_stream_arbiter #(
                 if (m_valid && m_ready) begin
                     src = m_source;
                     check(queued[src] > 0, "output has no accepted input");
-                    check({m_last, m_data} === queue_data[src][head[src]], "data/LAST mismatch or source reordering");
-                    check(m_data[DATA_WIDTH-1 -: SOURCE_WIDTH] == src, "payload source identifier mismatch");
+                    check(m_last === queue_data[src][head[src]][DATA_WIDTH] &&
+                          m_keep === queue_keep[src][head[src]], "LAST/KEEP mismatch or source reordering");
+                    for (byte_index = 0; byte_index < KEEP_WIDTH; byte_index = byte_index+1)
+                        if (queue_keep[src][head[src]][byte_index]) begin
+                            check(m_data[byte_index*8 +: 8] === queue_data[src][head[src]][byte_index*8 +: 8],
+                                  "valid data byte mismatch or source reordering");
+                            delivered_bytes = delivered_bytes+1;
+                        end
+                    if (m_keep[KEEP_WIDTH-1])
+                        check(m_data[DATA_WIDTH-1 -: SOURCE_WIDTH] == src, "payload source identifier mismatch");
                     if (PACKET_MODE) begin
                         if (frame_beat != 0) check(src == frame_source, "packet output switched sources within a frame");
                         check(frame_beat < MAX_FRAME_BEATS, "output packet exceeded MAX_FRAME_BEATS");
@@ -242,9 +292,9 @@ module tb_stream_arbiter #(
                             wait_sum[src] = wait_sum[src] + wait_time;
                             if (wait_time > wait_max[src]) wait_max[src] = wait_time;
                         end
-                        if (events) $fdisplay(events, "%0d,WAIT,%0d,%0d,0,%0d", cycle, src, wait_time, measuring);
+                        if (events) $fdisplay(events, "%0d,WAIT,%0d,%0d,0,%0d,0", cycle, src, wait_time, measuring);
                     end
-                    if (events) $fdisplay(events, "%0d,OUT,%0d,%08x,%0d,%0d", cycle, src, m_data, m_last, measuring);
+                    if (events) $fdisplay(events, "%0d,OUT,%0d,%08x,%0d,%0d,%x", cycle, src, m_data, m_last, measuring, m_keep);
                     if (measuring) win_beats = win_beats + 1;
                     head[src] = (head[src] + 1) % QSIZE;
                     queued[src] = queued[src] - 1;
@@ -267,9 +317,17 @@ module tb_stream_arbiter #(
                             frame_time[i][in_frames[i] % 4096] = cycle;
                             in_frames[i] = in_frames[i] + 1;
                         end
-                        if (events) $fdisplay(events, "%0d,IN,%0d,%08x,%0d,%0d", cycle, i, s_data[i*DATA_WIDTH +: DATA_WIDTH], s_last[i], measuring);
+                        accepted_keep = KEEP_ENABLE ? s_keep[i*KEEP_WIDTH +: KEEP_WIDTH] : {KEEP_WIDTH{1'b1}};
+                        if (PACKET_MODE && ((KEEP_ENABLE && !legal_keep(s_last[i], accepted_keep)) ||
+                            (!s_last[i] && input_frame_beat[i]+1 >= MAX_FRAME_BEATS)))
+                            input_frame_fault[i] = 1;
+                        if (events) $fdisplay(events, "%0d,IN,%0d,%08x,%0d,%0d,%x", cycle, i, s_data[i*DATA_WIDTH +: DATA_WIDTH], s_last[i], measuring, s_keep[i*KEEP_WIDTH +: KEEP_WIDTH]);
                         grand_accepted = grand_accepted + 1;
                         queue_data[i][tail[i]] = {s_last[i], s_data[i*DATA_WIDTH +: DATA_WIDTH]};
+                        queue_keep[i][tail[i]] = accepted_keep;
+                        queue_good_end[i][tail[i]] = s_last[i] && !input_frame_fault[i];
+                        for (byte_index = 0; byte_index < KEEP_WIDTH; byte_index = byte_index+1)
+                            if (accepted_keep[byte_index]) accepted_bytes = accepted_bytes+1;
                         tail[i] = (tail[i] + 1) % QSIZE;
                         queued[i] = queued[i] + 1;
                         issued[i] = issued[i] + 1;
@@ -310,6 +368,9 @@ module tb_stream_arbiter #(
                 s_valid[i] = (issued[i] < limit[i]) && (issue_mask[i] || input_stalled[i]);
                 s_data[i*DATA_WIDTH +: DATA_WIDTH] = payload(i, issued[i]);
                 s_last[i] = PACKET_MODE ? packet_tail[i][issued[i] % PACKET_PLAN_SIZE] : (issued[i] % 16) == 15;
+                // Disabled KEEP is intentionally driven with masks outside the
+                // supported subset; the core must ignore them and emit all ones.
+                s_keep[i*KEEP_WIDTH +: KEEP_WIDTH] = KEEP_ENABLE ? packet_keep[i][issued[i] % PACKET_PLAN_SIZE] : issued[i];
             end
         end
     endtask
@@ -343,6 +404,7 @@ module tb_stream_arbiter #(
             issue_mask = {PORTS{1'b1}};
             mode_rr = mode;
             s_valid = 0;
+            s_keep = {PORTS*KEEP_WIDTH{1'b1}};
             m_ready = 0;
             for (i = 0; i < PORTS; i = i + 1) begin
                 limit[i] = 0;
@@ -519,6 +581,7 @@ module tb_stream_arbiter #(
             cycles(3);
             check(frame_beat == 0 && !m_valid, "drain ended in an incomplete frame");
             check(accepted == delivered, "drain count mismatch");
+            check(accepted_bytes == delivered_bytes, "drain valid-byte count mismatch");
         end
     endtask
 
@@ -847,7 +910,7 @@ module tb_stream_arbiter #(
         if ($value$plusargs("EVENTS=%s", event_path)) begin
             events = $fopen(event_path, "w");
             check(events != 0, "cannot open EVENTS file");
-            $fdisplay(events, "cycle,event,source,data_or_wait,last,measured");
+            $fdisplay(events, "cycle,event,source,data_or_wait,last,measured,keep");
         end
         check(mode == 0 || mode == 1, "MODE must be 0 or 1");
         check(PACKET_MODE == (test_case == "packet"), "PACKET_MODE and packet CASE must agree");
@@ -862,8 +925,8 @@ module tb_stream_arbiter #(
         else $fatal(1, "unknown CASE=%s", test_case);
         check(grand_accepted == grand_delivered + discarded, "lifetime accepted/delivered/discarded mismatch");
         if (events) $fclose(events);
-        $display("PASS stream PORTS=%0d WIDTH=%0d DEPTH=%0d AXIS=%0d PACKET=%0d MAX=%0d MODE=%0d CASE=%s epochs=%0d beats=%0d discarded=%0d stalls=%0d tail_stalls=%0d source_gaps=%0d full_cycles=%0d",
-                 PORTS, DATA_WIDTH, FIFO_DEPTH, AXIS, PACKET_MODE, MAX_FRAME_BEATS, mode, test_case, tests, grand_delivered, discarded, stall_cycles, tail_stalls, source_gaps, full_cycles);
+        $display("PASS stream PORTS=%0d WIDTH=%0d DEPTH=%0d AXIS=%0d PACKET=%0d MAX=%0d KEEP=%0d MODE=%0d CASE=%s epochs=%0d beats=%0d discarded=%0d stalls=%0d tail_stalls=%0d source_gaps=%0d full_cycles=%0d",
+                 PORTS, DATA_WIDTH, FIFO_DEPTH, AXIS, PACKET_MODE, MAX_FRAME_BEATS, KEEP_ENABLE, mode, test_case, tests, grand_delivered, discarded, stall_cycles, tail_stalls, source_gaps, full_cycles);
         $finish;
     end
 endmodule

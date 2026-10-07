@@ -8,18 +8,21 @@ module stream_arbiter #(
     // Each lane has a static 1..16 beat admission threshold; lane 0 is bits 4:0.
     parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}},
     parameter integer PACKET_MODE = 0,
-    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH
+    parameter integer MAX_FRAME_BEATS = FIFO_DEPTH,
+    parameter integer KEEP_ENABLE = 0
 ) (
     input  wire         clk,
     input  wire         rst,
     input  wire         mode_rr,
 
     input  wire [PORTS*DATA_WIDTH-1:0] s_data,
+    input  wire [PORTS*(DATA_WIDTH/8)-1:0] s_keep,
     input  wire [PORTS-1:0] s_last,
     input  wire [PORTS-1:0] s_valid,
     output wire [PORTS-1:0] s_ready,
 
     output wire [DATA_WIDTH-1:0] m_data,
+    output wire [DATA_WIDTH/8-1:0] m_keep,
     output wire        m_last,
     output wire        m_valid,
     input  wire        m_ready,
@@ -29,7 +32,11 @@ module stream_arbiter #(
     output wire [PORTS*($clog2(FIFO_DEPTH)+1)-1:0] fifo_level
 );
     localparam integer LEVEL_WIDTH = $clog2(FIFO_DEPTH) + 1;
+    localparam integer KEEP_WIDTH = DATA_WIDTH / 8;
+    localparam integer PAYLOAD_WIDTH = DATA_WIDTH + KEEP_WIDTH;
     wire [PORTS*DATA_WIDTH-1:0] head_data;
+    wire [PORTS*KEEP_WIDTH-1:0] head_keep;
+    wire [PORTS*PAYLOAD_WIDTH-1:0] head_payload;
     wire [PORTS-1:0] head_last;
     wire [PORTS-1:0] head_valid;
     wire [PORTS-1:0] eligible, eligible_next;
@@ -51,6 +58,10 @@ module stream_arbiter #(
             (PACKET_MODE && ADMISSION_LEVELS != {PORTS{5'd1}})) begin : unsupported_packet
             STREAM_ARBITER_UNSUPPORTED_PACKET_PARAMETERS invalid_packet ();
         end
+        if ((KEEP_ENABLE != 0 && KEEP_ENABLE != 1) ||
+            (KEEP_ENABLE && !PACKET_MODE)) begin : unsupported_keep
+            STREAM_ARBITER_UNSUPPORTED_KEEP_PARAMETERS invalid_keep ();
+        end
         for (lane = 0; lane < PORTS; lane = lane + 1) begin : inputs
             localparam [4:0] ADMISSION = ADMISSION_LEVELS[lane*5 +: 5];
             wire [LEVEL_WIDTH-1:0] level = fifo_level[lane*LEVEL_WIDTH +: LEVEL_WIDTH];
@@ -66,19 +77,24 @@ module stream_arbiter #(
             // continues to use nonempty, independently of the threshold.
             assign eligible[lane] = PACKET_MODE ? frame_available : (!rst && (level >= ADMISSION));
             assign eligible_next[lane] = PACKET_MODE ? frame_available_next : (!rst && (level_next >= ADMISSION));
+            assign head_payload[lane*PAYLOAD_WIDTH +: PAYLOAD_WIDTH] =
+                {head_keep[lane*KEEP_WIDTH +: KEEP_WIDTH], head_data[lane*DATA_WIDTH +: DATA_WIDTH]};
             stream_fifo #(
                 .DATA_WIDTH (DATA_WIDTH),
                 .FIFO_DEPTH (FIFO_DEPTH),
                 .PACKET_MODE (PACKET_MODE),
-                .MAX_FRAME_BEATS (MAX_FRAME_BEATS)
+                .MAX_FRAME_BEATS (MAX_FRAME_BEATS),
+                .KEEP_ENABLE (KEEP_ENABLE)
             ) fifo (
                 .clk            (clk),
                 .rst            (rst),
                 .s_data         (s_data[lane*DATA_WIDTH +: DATA_WIDTH]),
+                .s_keep         (s_keep[lane*KEEP_WIDTH +: KEEP_WIDTH]),
                 .s_last         (s_last[lane]),
                 .s_valid        (s_valid[lane]),
                 .s_ready        (s_ready[lane]),
                 .m_data         (head_data[lane*DATA_WIDTH +: DATA_WIDTH]),
+                .m_keep         (head_keep[lane*KEEP_WIDTH +: KEEP_WIDTH]),
                 .m_last         (head_last[lane]),
                 .m_valid        (head_valid[lane]),
                 .m_ready        (head_ready[lane]),
@@ -108,16 +124,16 @@ module stream_arbiter #(
     // 3. 输出被授权 FIFO 的队首，只向该路返回 ready。
     stream_mux #(
         .PORTS      (PORTS),
-        .DATA_WIDTH (DATA_WIDTH)
+        .DATA_WIDTH (PAYLOAD_WIDTH)
     ) output_mux (
         .rst        (rst),
         .active     (grant_active),
         .source     (m_source),
-        .s_data     (head_data),
+        .s_data     (head_payload),
         .s_last     (head_last),
         .s_valid    (head_valid),
         .s_ready    (head_ready),
-        .m_data     (m_data),
+        .m_data     ({m_keep, m_data}),
         .m_last     (m_last),
         .m_valid    (m_valid),
         .m_ready    (m_ready),

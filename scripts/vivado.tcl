@@ -7,8 +7,8 @@ set context registered
 set ports 4
 set width 32
 set depth 64
-if {$argc ni {0 1 2 5 6 7 8 9}} {
-    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv? ?frame_fifo? ?packet_mode? ?max_frame_beats?"
+if {$argc ni {0 1 2 5 6 7 8 9 10}} {
+    error "Usage: vivado.tcl ?top? ?registered|ports? ?ports width depth? ?admission_csv? ?frame_fifo? ?packet_mode? ?max_frame_beats? ?keep_enable?"
 }
 if {$argc >= 1} {set top [lindex $argv 0]}
 if {$argc >= 2} {set context [lindex $argv 1]}
@@ -35,9 +35,15 @@ if {$frame_fifo ni {0 1}} {error "FRAME_FIFO must be 0 or 1"}
 if {$top ne "axis_external" && $frame_fifo} {error "FRAME_FIFO is external-only"}
 set packet_mode 0
 set max_frame_beats $depth
+set keep_enable 0
 if {$argc >= 8} {set packet_mode [lindex $argv 7]}
 if {$argc >= 9} {set max_frame_beats [lindex $argv 8]}
+if {$argc >= 10} {set keep_enable [lindex $argv 9]}
 if {$packet_mode ni {0 1}} {error "PACKET_MODE must be 0 or 1"}
+if {$keep_enable ni {0 1}} {error "KEEP_ENABLE must be 0 or 1"}
+if {$keep_enable && ($top ni {stream_arbiter axis_stream_arbiter} || !$packet_mode)} {
+    error "KEEP_ENABLE requires packet mode on the local core or AXIS top"
+}
 if {$top ni {stream_arbiter axis_stream_arbiter} && ($packet_mode || $argc >= 9)} {
     error "PACKET_MODE/MAX_FRAME_BEATS apply only to the local core and AXIS tops"
 }
@@ -61,6 +67,7 @@ if {$packet_mode && $nondefault} {error "Packet mode requires H=1 on every lane"
 set configuration p${ports}-w${width}-d${depth}
 if {$nondefault} {append configuration -h[join $levels -]}
 if {$packet_mode} {append configuration -packet-m${max_frame_beats}}
+if {$keep_enable} {append configuration -keep1}
 if {$top eq "axis_external"} {append configuration -frame${frame_fifo}}
 set out_dir [file join $root build vivado $top $configuration $context]
 file mkdir $out_dir
@@ -88,6 +95,7 @@ if {$top ne "stream_selftest"} {
     } else {
         lappend synth_args -generic "ADMISSION_LEVELS=[expr {$ports*5}]'d$admission"
         lappend synth_args -generic PACKET_MODE=$packet_mode -generic MAX_FRAME_BEATS=$max_frame_beats
+        lappend synth_args -generic KEEP_ENABLE=$keep_enable
     }
 }
 synth_design {*}$synth_args

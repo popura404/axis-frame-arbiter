@@ -3,8 +3,13 @@ task automatic packet_append(input integer lane, input integer length);
     integer n;
     begin
         check(length > 0 && packet_end[lane]+length < PACKET_PLAN_SIZE, "packet stimulus plan overflow");
-        for (n = 0; n < length; n = n + 1)
+        for (n = 0; n < length; n = n + 1) begin
             packet_tail[lane][packet_end[lane]+n] = n == length-1;
+            packet_keep[lane][packet_end[lane]+n] = {KEEP_WIDTH{1'b1}};
+            if (KEEP_ENABLE && n == length-1)
+                packet_keep[lane][packet_end[lane]+n] = {KEEP_WIDTH{1'b1}} >>
+                    (KEEP_WIDTH-1-(packet_end[lane]+lane)%KEEP_WIDTH);
+        end
         packet_end[lane] = packet_end[lane] + length;
     end
 endtask
@@ -215,8 +220,126 @@ task automatic packet_tests;
         drain();
         for (lane = 0; lane < PORTS; lane = lane + 1)
             check(frames[lane] == 48, "packet random stream lost a frame");
+        if (KEEP_ENABLE) keep_tests();
+        else begin
+            // Even a changing, invalid raw KEEP must be ignored when disabled.
+            reset_epoch();
+            for (n = 0; n < FIFO_DEPTH+1; n = n+1) packet_append(0, 1);
+            packet_release();
+            cycles(FIFO_DEPTH+3);
+            check(s_valid[0] && !s_ready[0], "disabled-KEEP setup was not backpressured");
+            s_keep[KEEP_WIDTH-1:0] = ~s_keep[KEEP_WIDTH-1:0];
+            tick();
+            check(protocol_error == 0, "disabled KEEP was checked as a stability error");
+            drain();
+        end
         check(source_gaps == before_gaps, "completed packet suffered source starvation");
         $display("PACKET max=%0d lengths=1..MAX single_beat_capacity=%0d same_edge_commit=2 oversize=1 reset=1 random_frames_per_lane=48",
                  MAX_FRAME_BEATS, FIFO_DEPTH);
+    end
+endtask
+
+// Illegal masks are accepted into the uncommitted tail of the FIFO. In
+// particular, a raw TLAST with invalid KEEP is never a committed boundary.
+task automatic bad_keep(input integer kind);
+    integer bad_length, prefix_length, accepted_bad, n;
+    reg [KEEP_WIDTH-1:0] mask;
+    begin
+        reset_epoch();
+        expected_error = 1;
+        bad_length = MAX_FRAME_BEATS > 1 ? 2 : 1;
+        prefix_length = kind == 3 ? 0 : bad_length-1;
+        case (kind)
+            0: mask = 0;
+            1: mask = 1 << (KEEP_WIDTH-1);
+            2: mask = 5;
+            default: mask = 1;
+        endcase
+        packet_append(0, 1);
+        packet_append(0, bad_length);
+        packet_append(0, 1);
+        packet_keep[0][1+prefix_length] = mask;
+        limit[0] = 1+prefix_length;
+        cycles(bad_length+4);
+        check(m_valid && m_last && m_source == 0, "bad KEEP same-edge setup lacked old complete packet");
+        limit[0] = packet_end[0];
+        m_ready = 1;
+        cycles(1);
+        accepted_bad = 1+prefix_length;
+        check(protocol_error == {{(PORTS-1){1'b0}}, 1'b1} && !s_ready[0] && !m_valid,
+              "invalid KEEP committed or reauthorized its same-edge outgoing source");
+        check(frames[0] == 1 && queued[0] == accepted_bad && issued[0] == 1+accepted_bad,
+              "invalid KEEP lost old complete data or accepted a later beat");
+        packet_append(PORTS-1, bad_length);
+        limit[PORTS-1] = packet_end[PORTS-1];
+        cycles(2*bad_length+8);
+        check(frames[PORTS-1] == 1 && queued[0] == accepted_bad && !m_valid && !s_ready[0],
+              "invalid KEEP lane blocked competitors or leaked uncommitted data");
+        $display("EXPECTED_ERROR KEEP kind=%0d mask=%x accepted_uncommitted=%0d same_edge_old_tail=1",
+                 kind, mask, accepted_bad);
+        // Retained data is accounted as reset-discarded, never forced to drain.
+        reset_epoch();
+        packet_append(0, 1);
+        packet_release();
+        drain();
+    end
+endtask
+
+task automatic keep_tests;
+    integer bytes, length, n, before_violations, expected_bytes;
+    reg [KEEP_WIDTH-1:0] mask;
+    begin
+        length = MAX_FRAME_BEATS > 1 ? 2 : 1;
+        // Every legal terminal mask appears in a one-beat packet and at the
+        // end of a longer packet, with explicit output stalls at each tail.
+        for (bytes = 1; bytes <= KEEP_WIDTH; bytes = bytes+1) begin
+            reset_epoch();
+            mask = {KEEP_WIDTH{1'b1}} >> (KEEP_WIDTH-bytes);
+            packet_append(0, 1);
+            packet_keep[0][0] = mask;
+            packet_append(0, length);
+            packet_keep[0][length] = mask;
+            packet_release();
+            cycles(length+4);
+            check(m_valid && m_last && m_keep == mask, "one-beat packet lost its terminal KEEP");
+            cycles(2);
+            m_ready = 1;
+            cycles(length);
+            m_ready = 0;
+            cycles(3);
+            check(m_valid && m_last && m_keep == mask, "partial terminal KEEP changed during output stall");
+            drain();
+            expected_bytes = 2*bytes+(length-1)*KEEP_WIDTH;
+            check(frames[0] == 2 && delivered_bytes == expected_bytes,
+                  "terminal KEEP did not preserve the independent valid-byte count");
+        end
+        bad_keep(0); // zero-byte tail
+        bad_keep(1); // high bytes without low bytes
+        bad_keep(2); // sparse 0101
+        if (MAX_FRAME_BEATS > 1) bad_keep(3); // partial non-tail
+
+        // Changing KEEP while stalled is a protocol diagnostic. When the
+        // eventually accepted mask is legal, it does not quarantine the lane.
+        reset_epoch();
+        for (n = 0; n < FIFO_DEPTH+1; n = n+1) packet_append(0, 1);
+        packet_release();
+        cycles(FIFO_DEPTH+3);
+        check(s_valid[0] && !s_ready[0] && s_keep[KEEP_WIDTH-1:0] != {KEEP_WIDTH{1'b1}},
+              "KEEP stability-negative setup was not blocked with a partial mask");
+        expected_error = 1;
+        before_violations = violation_count;
+        packet_keep[0][issued[0]] = {KEEP_WIDTH{1'b1}};
+        drive();
+        tick();
+        check(protocol_error[0] && violation_count == before_violations+1,
+              "stalled KEEP change was not independently detected");
+        drain();
+        check(frames[0] == FIFO_DEPTH+1 && protocol_error[0], "KEEP stability error incorrectly quarantined a legal tail");
+        reset_epoch();
+        packet_append(0, 1);
+        packet_release();
+        drain();
+        $display("KEEP valid_terminal_masks=%0d invalid_tail_masks=3 invalid_non_tail=%0d stability_change=1 byte_counts_checked=1",
+                 KEEP_WIDTH, MAX_FRAME_BEATS > 1);
     end
 endtask

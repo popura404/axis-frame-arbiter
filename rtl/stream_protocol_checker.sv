@@ -4,11 +4,13 @@
 module stream_protocol_checker #(
     parameter integer DATA_WIDTH = 32,
     parameter integer PACKET_MODE = 0,
-    parameter integer MAX_FRAME_BEATS = 64
+    parameter integer MAX_FRAME_BEATS = 64,
+    parameter integer KEEP_ENABLE = 0
 ) (
     input  wire        clk,
     input  wire        rst,
     input  wire [DATA_WIDTH-1:0] data,
+    input  wire [DATA_WIDTH/8-1:0] keep,
     input  wire        last,
     input  wire        valid,
     input  wire        ready,
@@ -21,10 +23,15 @@ module stream_protocol_checker #(
     localparam [BEAT_WIDTH-1:0] LAST_BEAT = FRAME_LIMIT - 1;
     reg [BEAT_WIDTH-1:0] beat;
     reg stalled;
-    reg [DATA_WIDTH:0] held;
+    localparam integer KEEP_WIDTH = DATA_WIDTH / 8;
+    wire [KEEP_WIDTH-1:0] effective_keep = KEEP_ENABLE ? keep : {KEEP_WIDTH{1'b1}};
+    wire [KEEP_WIDTH-1:0] keep_plus_one = keep + 1'b1;
+    wire keep_bad = KEEP_ENABLE && ((keep == 0) ||
+        (!last && keep != {KEEP_WIDTH{1'b1}}) || (last && ((keep & keep_plus_one) != 0)));
+    reg [DATA_WIDTH+KEEP_WIDTH:0] held;
 
     // Sample frame_bad only on an accepted beat. A bad tail must not commit.
-    assign frame_bad = PACKET_MODE ? ((beat == LAST_BEAT) && !last) :
+    assign frame_bad = PACKET_MODE ? (((beat == LAST_BEAT) && !last) || keep_bad) :
                                     (last != (beat == LAST_BEAT));
 
     always @(posedge clk) begin
@@ -36,10 +43,10 @@ module stream_protocol_checker #(
             frame_fault <= 0;
         end else begin
             // 上拍未被接受的数据，本拍仍必须有效且内容不变。
-            if (stalled && (!valid || {last, data} != held))
+            if (stalled && (!valid || {effective_keep, last, data} != held))
                 protocol_error <= 1;
             stalled <= valid && !ready;
-            held <= {last, data};
+            held <= {effective_keep, last, data};
 
             if (valid && ready) begin
                 if (frame_bad)

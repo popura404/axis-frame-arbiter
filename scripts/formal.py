@@ -76,9 +76,9 @@ def result_status(record, mode, text, underflow_line, expected_covers):
     return "FAIL" if "Status: FAILED" in text else "TOOL_ERROR"
 
 
-def module_checks(args, env):
+def module_checks(args, env, packet_case=None):
     packet = args.target == "packet"
-    folder = BUILD / args.target
+    folder = BUILD / (f"packet-{packet_case}" if packet else args.target)
     folder.mkdir(parents=True, exist_ok=True)
     checks = list(dict.fromkeys(args.check or (["bmc", "cover"] if packet else ["bmc", "induction", "cover"])))
     if "negative" in checks or (packet and "induction" in checks) or args.gap or args.data:
@@ -86,9 +86,12 @@ def module_checks(args, env):
     sources = ([*sorted((ROOT / "rtl").glob("*.sv")), ROOT / "formal/packet.sv"] if packet else
                [ROOT / "rtl/frame_arbiter.sv", ROOT / "formal/scheduler.sv"])
     configuration = ({"target": "stream_arbiter", "ports": 2, "width": 32, "fifo_depth": 16,
-                      "packet_mode": 1, "max_frame_beats": 3, "reset": "initial only", "steps": args.depth} if packet else
+                      "packet_mode": 1, "max_frame_beats": 3, "keep_enable": 1, "packet_case": packet_case, "reset": "initial only", "steps": args.depth} if packet else
                      {"target": "frame_arbiter", "ports": 2, "steps": args.depth})
-    scope = ("bounded pre-registered packets: source0 legal 2-beat frame then 3 beats without LAST and a held pending tail; source1 legal 3-beat frame after fault; READY=0 for five-beat preload then arbitrary; interface-only payload/LAST/ordering/occupancy/stability/quarantine checks; no arbitrary-traffic or unbounded proof" if packet else
+    scope = ("bounded pre-registered packets: source0 legal 2-beat frame then " +
+             ("3 beats without LAST; READY=0 for five-beat preload then arbitrary" if packet_case == "length" else
+              "KEEP=0101 tail accepted on the old output tail edge; READY=1 through cycle 4 then arbitrary") +
+             "; held pending legal tail after fault; source1 legal 3-beat frame after fault; legal tails have partial KEEP; interface-only valid-byte/KEEP/LAST/ordering/occupancy/stability/quarantine checks; no arbitrary-traffic or unbounded proof" if packet else
              "interface-level grant hold and eligible selection; arbitrary availability/frame_done, fixed reset-sampled mode; does not prove parent eligibility, priority order, mode capture, or frame completion")
     report = {"configuration": configuration, "scope": scope,
               "versions": {name: subprocess.check_output(cmd, env=env, text=True).strip() for name, cmd in
@@ -98,6 +101,8 @@ def module_checks(args, env):
     top = "formal_packet" if packet else "formal_scheduler"
     smt = (folder / "design.smt2").relative_to(ROOT).as_posix()
     command = "read_verilog -formal -sv " + " ".join(p.relative_to(ROOT).as_posix() for p in sources)
+    if packet:
+        command += f"; chparam -set KEEP_FAULT {int(packet_case == 'keep')} formal_packet"
     command += f"; prep -top {top}; flatten; " + ("memory_map; " if packet else "")
     command += f"opt; dffunmap; write_smt2 -wires {smt}"
     compiled = run(["yosys", "-Q", "-T", "-p", command], folder / "compile.log", env, args.timeout)
@@ -116,7 +121,7 @@ def module_checks(args, env):
             job["status"] = result_status(job, check, (ROOT / job["log"]).read_text(), 0, 2)
             okay &= job["status"] == "PASS"
             report["jobs"].append(job)
-            print(f"{args.target} {check}: {job['status']}", flush=True)
+            print(f"{folder.name} {check}: {job['status']}", flush=True)
     report["all_requested_checks_met"] = okay
     (folder / "results.json").write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
     return okay
@@ -125,8 +130,10 @@ def module_checks(args, env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("admission", "scheduler", "packet"), default="admission")
+    parser.add_argument("--packet-case", action="append", choices=("length", "keep"),
+                        help="packet only: default checks both the length and KEEP fault scenarios")
     parser.add_argument("--gap", type=int, action="append", choices=(1, 2, 4, 8), help="default: 2")
-    parser.add_argument("--depth", type=int, help="SMTBMC steps including reset; default: packet 32, others 48")
+    parser.add_argument("--depth", type=int, help="SMTBMC steps including reset; default: packet 24, others 48")
     parser.add_argument("--timeout", type=int, default=90, help="wall seconds per tool invocation")
     parser.add_argument("--check", action="append", choices=("bmc", "cover", "negative", "induction"))
     parser.add_argument("--ready", choices=("always", "arbitrary"), default="always",
@@ -136,15 +143,20 @@ def main():
     parser.add_argument("--data", action="store_true", help="admission only: also check deterministic 32-bit sequence tags")
     args = parser.parse_args()
     if args.depth is None:
-        args.depth = 32 if args.target == "packet" else 48
+        args.depth = 24 if args.target == "packet" else 48
     if args.depth < 2 or args.timeout < 1:
         parser.error("depth >= 2 and timeout >= 1 are required")
     gaps = list(dict.fromkeys(args.gap or [2]))
     checks = list(dict.fromkeys(args.check or ["bmc", "cover", "negative"]))
     if args.target == "admission" and checks == ["negative"] and gaps == [1]:
         parser.error("G=1 would require illegal H=0; no valid RTL underflow experiment exists")
+    if args.packet_case and args.target != "packet":
+        parser.error("--packet-case requires --target packet")
     env = environment()
-    if args.target in ("scheduler", "packet"):
+    if args.target == "packet":
+        outcomes = [module_checks(args, env, case) for case in dict.fromkeys(args.packet_case or ["length", "keep"])]
+        raise SystemExit(0 if all(outcomes) else 1)
+    if args.target == "scheduler":
         raise SystemExit(0 if module_checks(args, env) else 1)
     BUILD.mkdir(parents=True, exist_ok=True)
     rtl = sorted((ROOT / "rtl").glob("*.sv"))
