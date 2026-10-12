@@ -11,6 +11,7 @@ module tb_stream_arbiter #(
     parameter integer PACKET_MODE = 0,
     parameter integer MAX_FRAME_BEATS = FIFO_DEPTH,
     parameter integer KEEP_ENABLE = 0,
+    parameter integer RFNOC = 0,
     parameter [PORTS*5-1:0] ADMISSION_LEVELS = {PORTS{5'd1}}
 );
     localparam SOURCE_WIDTH = $clog2(PORTS);
@@ -33,7 +34,18 @@ module tb_stream_arbiter #(
     wire [SOURCE_WIDTH-1:0] m_source;
 
     generate
-        if (EXTERNAL) begin : external_interface
+        if (RFNOC) begin : rfnoc_interface
+            rfnoc_arbiter #(.EXTERNAL(EXTERNAL), .PORTS(PORTS),
+                .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
+                .MAX_FRAME_BEATS(MAX_FRAME_BEATS)) dut (
+                .clk(clk), .rst(rst), .s_data(s_data), .s_last(s_last),
+                .s_valid(s_valid), .s_ready(s_ready), .m_data(m_data),
+                .m_last(m_last), .m_valid(m_valid), .m_ready(m_ready),
+                .m_source(m_source), .protocol_error(protocol_error)
+            );
+            assign fifo_level = 0;
+            assign m_keep = {KEEP_WIDTH{1'b1}};
+        end else if (EXTERNAL) begin : external_interface
             axis_external #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
                 .FRAME_FIFO(FRAME_FIFO)
@@ -103,6 +115,7 @@ module tb_stream_arbiter #(
     integer contract_misses [0:PORTS-1];
     reg [PORTS-1:0] contract_enable = 0;
     reg allow_contract_violation = 0;
+    reg rf_diagnostic = 0;
 
     function automatic integer admission_level(input integer lane);
         admission_level = ADMISSION_LEVELS[lane*5 +: 5];
@@ -161,8 +174,8 @@ module tb_stream_arbiter #(
 
     // Called on the sampling edge, before nonblocking DUT state updates.
     task automatic sample;
-        integer i, candidate, offset, src, wait_time, byte_index;
-        reg tail_transfer;
+        integer i, candidate, offset, src, wait_time, byte_index, rejected_prefix;
+        reg tail_transfer, was_frame_fault;
         reg [KEEP_WIDTH-1:0] accepted_keep;
         begin
             cycle = cycle + 1;
@@ -192,17 +205,18 @@ module tb_stream_arbiter #(
                 input_frame_fault = 0;
             end else begin
                 if (test_case == "study") study_sample();
+                if (RFNOC && !rf_diagnostic) rfnoc_sample();
                 if (!expected_error) check(protocol_error === {PORTS{1'b0}}, "unexpected input protocol error");
                 if (measuring) win_cycles = win_cycles + 1;
                 for (i = 0; i < PORTS; i = i + 1) begin
                     accepted_keep = KEEP_ENABLE ? s_keep[i*KEEP_WIDTH +: KEEP_WIDTH] : {KEEP_WIDTH{1'b1}};
                     if (input_stalled[i] && (!s_valid[i] || {s_last[i], accepted_keep, s_data[i*DATA_WIDTH +: DATA_WIDTH]} !== input_held[i])) begin
                         violation_count = violation_count + 1;
-                        check(expected_error, "source violated ready/valid protocol");
+                        check(expected_error && !RFNOC, "source violated ready/valid protocol");
                     end
                     input_stalled[i] = s_valid[i] && !s_ready[i];
                     input_held[i] = {s_last[i], accepted_keep, s_data[i*DATA_WIDTH +: DATA_WIDTH]};
-                    if (PACKET_MODE && input_frame_fault[i])
+                    if (PACKET_MODE && input_frame_fault[i] && !EXTERNAL)
                         check(!s_ready[i], "faulted input lane resumed acceptance before reset");
                     // Independent ready-opportunity contract monitor. A source
                     // may violate this deadline while remaining AXIS-correct.
@@ -255,7 +269,7 @@ module tb_stream_arbiter #(
                 end
 
                 for (i = 0; i < PORTS; i = i + 1) begin
-                    if (!EXTERNAL)
+                    if (!EXTERNAL && !RFNOC)
                         check(fifo_level[i*LEVEL_WIDTH +: LEVEL_WIDTH] == queued[i], "FIFO level differs from accepted transactions");
                     if (queued[i] == FIFO_DEPTH) full_cycles = full_cycles + 1;
                 end
@@ -273,7 +287,7 @@ module tb_stream_arbiter #(
                                   "valid data byte mismatch or source reordering");
                             delivered_bytes = delivered_bytes+1;
                         end
-                    if (m_keep[KEEP_WIDTH-1])
+                    if (m_keep[KEEP_WIDTH-1] && !RFNOC)
                         check(m_data[DATA_WIDTH-1 -: SOURCE_WIDTH] == src, "payload source identifier mismatch");
                     if (PACKET_MODE) begin
                         if (frame_beat != 0) check(src == frame_source, "packet output switched sources within a frame");
@@ -312,6 +326,7 @@ module tb_stream_arbiter #(
 
                 for (i = 0; i < PORTS; i = i + 1)
                     if (s_valid[i] && s_ready[i]) begin
+                        was_frame_fault = input_frame_fault[i];
                         check(queued[i] < QSIZE-1, "input accepted beyond storage capacity");
                         if (PACKET_MODE ? input_frame_beat[i] == 0 : (issued[i] % 16) == 0) begin
                             frame_time[i][in_frames[i] % 4096] = cycle;
@@ -331,6 +346,16 @@ module tb_stream_arbiter #(
                         tail[i] = (tail[i] + 1) % QSIZE;
                         queued[i] = queued[i] + 1;
                         issued[i] = issued[i] + 1;
+                        // In the bounded baseline diagnostic, invalid accepted
+                        // prefixes are excluded from the expected output list.
+                        // This is interface accounting, not a FIFO pointer model.
+                        if (RFNOC && EXTERNAL && rf_diagnostic && input_frame_fault[i]) begin
+                            rejected_prefix = was_frame_fault ? 1 : input_frame_beat[i]+1;
+                            tail[i] = (tail[i]+QSIZE-rejected_prefix)%QSIZE;
+                            queued[i] = queued[i]-rejected_prefix;
+                            discarded = discarded+rejected_prefix;
+                            if (s_last[i]) input_frame_fault[i] = 0;
+                        end
                         input_frame_beat[i] = s_last[i] ? 0 : input_frame_beat[i] + 1;
                         accepted = accepted + 1;
                     end
@@ -887,6 +912,7 @@ module tb_stream_arbiter #(
 
     `include "sim/study_tasks.svh"
     `include "sim/packet_tasks.svh"
+    `include "sim/rfnoc_tasks.svh"
 
     integer init_i;
     // A deadlocked design must fail rather than leave a batch regression hung.
@@ -913,12 +939,14 @@ module tb_stream_arbiter #(
             $fdisplay(events, "cycle,event,source,data_or_wait,last,measured,keep");
         end
         check(mode == 0 || mode == 1, "MODE must be 0 or 1");
-        check(PACKET_MODE == (test_case == "packet"), "PACKET_MODE and packet CASE must agree");
-        if (EXTERNAL) check(mode == 1 && test_case == "study", "external reference is RR study only");
+        check(PACKET_MODE == (test_case == "packet" || test_case == "rfnoc"), "PACKET_MODE and packet CASE must agree");
+        check(RFNOC == (test_case == "rfnoc"), "RFNOC and rfnoc CASE must agree");
+        if (EXTERNAL) check(mode == 1 && (test_case == "study" || RFNOC), "external reference is RR comparison only");
         if (test_case == "directed") directed();
         else if (test_case == "admission") admission();
         else if (test_case == "packet") packet_tests();
         else if (test_case == "study") study();
+        else if (test_case == "rfnoc") rfnoc_tests();
         else if (test_case == "random") randomized();
         else if (test_case == "negative") negative();
         else if (test_case == "single" || test_case == "saturated" || test_case == "skew" || test_case == "sparse") performance();

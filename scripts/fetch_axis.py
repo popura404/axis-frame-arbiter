@@ -14,23 +14,28 @@ MANIFEST = ROOT / "scripts" / "external_axis.json"
 VENDOR = ROOT / "build" / "vendor" / "verilog-axis"
 
 
-def fetch(check_only=False):
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+def fetch(check_only=False, manifest_path=MANIFEST, vendor=VENDOR, label="external baseline"):
+    """Shared verified fetcher; the existing AXIS entry point keeps its defaults."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     commit = manifest["commit"]
+    repository = manifest["repository"]
+    if not re.fullmatch(r"https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("Pinned dependency must name a GitHub repository")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("External baseline requires a full commit SHA")
     for entry in manifest["files"]:
         relative = Path(entry["path"])
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"Invalid manifest path: {relative}")
-        target = VENDOR / relative
+        target = vendor / relative
         cached = target.exists()
         if cached:
             content = target.read_bytes()
         elif check_only:
-            raise ValueError(f"Missing {target}; run scripts/fetch_axis.py first")
+            raise ValueError(f"Missing {target}; fetch {label} first")
         else:
-            url = f"https://raw.githubusercontent.com/alexforencich/verilog-axis/{commit}/{relative.as_posix()}"
+            slug = repository.removeprefix("https://github.com/")
+            url = f"https://raw.githubusercontent.com/{slug}/{commit}/{relative.as_posix()}"
             with urllib.request.urlopen(url, timeout=30) as response:
                 content = response.read()
         if hashlib.sha256(content).hexdigest() != entry["sha256"]:
@@ -47,7 +52,7 @@ def fetch(check_only=False):
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)
         print(f"VERIFIED {relative.as_posix()} {entry['sha256']}")
-    print(f"PASS external baseline commit={commit} files={len(manifest['files'])}")
+    print(f"PASS {label} commit={commit} files={len(manifest['files'])}")
 
 
 def main():

@@ -2,12 +2,15 @@
 // Pinned verilog-axis reference; fetch with scripts/fetch_axis.py.
 // FIFO_DEPTH is RAM beats, not total accepted-but-unconsumed capacity:
 // per lane D+2 slots, plus 2 shared output/skid slots. No capacity equivalence
-// to stream_arbiter is implied. FRAME_FIFO applies to legal fixed-16-beat frames.
+// to stream_arbiter is implied. FRAME_LIMIT=0 preserves the legacy reference.
+// A positive limit checks the same length bound as packet mode, but marks and
+// discards the bad frame at its eventual tail instead of stopping the input.
 module axis_external #(
     parameter integer PORTS = 4,
     parameter integer DATA_WIDTH = 32,
     parameter integer FIFO_DEPTH = 16,
-    parameter integer FRAME_FIFO = 0
+    parameter integer FRAME_FIFO = 0,
+    parameter integer FRAME_LIMIT = 0
 ) (
     input  wire clk,
     input  wire rst,
@@ -19,7 +22,8 @@ module axis_external #(
     output wire m_last,
     output wire m_valid,
     input  wire m_ready,
-    output wire [$clog2(PORTS)-1:0] m_source
+    output wire [$clog2(PORTS)-1:0] m_source,
+    output wire [PORTS-1:0] protocol_error
 );
     localparam integer KEEP_WIDTH = DATA_WIDTH / 8;
     localparam integer SOURCE_WIDTH = $clog2(PORTS);
@@ -36,19 +40,55 @@ module axis_external #(
         if ((PORTS != 2 && PORTS != 4 && PORTS != 8) ||
             (DATA_WIDTH != 32 && DATA_WIDTH != 64) ||
             (FIFO_DEPTH != 16 && FIFO_DEPTH != 64) ||
-            (FRAME_FIFO != 0 && FRAME_FIFO != 1)) begin : unsupported_configuration
+            (FRAME_FIFO != 0 && FRAME_FIFO != 1) ||
+            FRAME_LIMIT < 0 || FRAME_LIMIT > FIFO_DEPTH ||
+            (FRAME_LIMIT > 0 && FRAME_FIFO != 1)) begin : unsupported_configuration
             EXTERNAL_AXIS_UNSUPPORTED_PARAMETERS invalid_configuration ();
         end
         for (lane = 0; lane < PORTS; lane = lane + 1) begin : inputs
             localparam [SOURCE_WIDTH-1:0] SOURCE_ID = lane;
+            wire bad_tail;
             assign source_id[lane*SOURCE_WIDTH +: SOURCE_WIDTH] = SOURCE_ID;
+            if (FRAME_LIMIT > 0) begin : bounded_frame
+                localparam integer COUNT_WIDTH = FRAME_LIMIT < 2 ? 1 : $clog2(FRAME_LIMIT+1);
+                localparam [COUNT_WIDTH-1:0] LIMIT_COUNT = FRAME_LIMIT;
+                localparam [COUNT_WIDTH-1:0] LAST_LEGAL_INDEX = FRAME_LIMIT-1;
+                reg [COUNT_WIDTH-1:0] beat_count = 0;
+                reg bad_frame = 0, error_seen = 0;
+                // The vendor FIFO samples USER on TLAST. Remember an earlier
+                // violation even if the source continues for arbitrarily long.
+                assign bad_tail = s_last[lane] && bad_frame;
+                assign protocol_error[lane] = error_seen;
+                always @(posedge clk) begin
+                    if (rst) begin
+                        beat_count <= 0;
+                        bad_frame <= 0;
+                        error_seen <= 0;
+                    end else if (s_valid[lane] && s_ready[lane]) begin
+                        if (s_last[lane]) begin
+                            beat_count <= 0;
+                            bad_frame <= 0;
+                        end else begin
+                            if (beat_count < LIMIT_COUNT) beat_count <= beat_count + 1'b1;
+                            if (beat_count == LAST_LEGAL_INDEX) begin
+                                bad_frame <= 1;
+                                error_seen <= 1;
+                            end
+                        end
+                    end
+                end
+            end else begin : legacy_frame
+                assign bad_tail = 1'b0;
+                assign protocol_error[lane] = 1'b0;
+            end
             axis_fifo #(
                 .DEPTH(FIFO_DEPTH), .DATA_WIDTH(DATA_WIDTH),
                 .KEEP_ENABLE(0), .KEEP_WIDTH(KEEP_WIDTH), .LAST_ENABLE(1),
                 .ID_ENABLE(0), .ID_WIDTH(1), .DEST_ENABLE(0), .DEST_WIDTH(1),
-                .USER_ENABLE(0), .USER_WIDTH(1), .RAM_PIPELINE(0),
+                .USER_ENABLE(FRAME_LIMIT > 0), .USER_WIDTH(1), .RAM_PIPELINE(0),
                 .OUTPUT_FIFO_ENABLE(0), .FRAME_FIFO(FRAME_FIFO),
-                .DROP_OVERSIZE_FRAME(0), .DROP_BAD_FRAME(0),
+                .DROP_OVERSIZE_FRAME(FRAME_LIMIT > 0), .DROP_BAD_FRAME(FRAME_LIMIT > 0),
+                .USER_BAD_FRAME_VALUE(1'b1), .USER_BAD_FRAME_MASK(1'b1),
                 .DROP_WHEN_FULL(0), .MARK_WHEN_FULL(0), .PAUSE_ENABLE(0)
             ) fifo (
                 .clk(clk), .rst(rst),
@@ -56,7 +96,7 @@ module axis_external #(
                 .s_axis_tkeep({KEEP_WIDTH{1'b1}}),
                 .s_axis_tvalid(s_valid[lane] && !rst), .s_axis_tready(input_ready[lane]),
                 .s_axis_tlast(s_last[lane]), .s_axis_tid(1'b0),
-                .s_axis_tdest(1'b0), .s_axis_tuser(1'b0),
+                .s_axis_tdest(1'b0), .s_axis_tuser(bad_tail),
                 .m_axis_tdata(fifo_data[lane*DATA_WIDTH +: DATA_WIDTH]),
                 .m_axis_tkeep(), .m_axis_tvalid(fifo_valid[lane]),
                 .m_axis_tready(fifo_ready[lane]), .m_axis_tlast(fifo_last[lane]),

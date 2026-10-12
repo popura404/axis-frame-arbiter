@@ -1,0 +1,147 @@
+{
+  "repository": "https://github.com/EttusResearch/uhd",
+  "commit": "d1be63490e3f3df22ff2f4ea1315f9aada468562",
+  "license": {
+    "spdx": "LGPL-3.0-or-later",
+    "notices": [
+      "LICENSE.md",
+      "fpga/usrp3/LICENSE.md"
+    ]
+  },
+  "notes": [
+    "Unmodified radio_tx_core, noc_shell_radio default ctrlport_endpoint configuration, and 32-word terminal axi_packet_gate.",
+    "XPM FIFO and SRLC32E simulation models come from the installed Vivado, not this cache.",
+    "noc_shell_radio.v and torus_2d_dor_router_single_sw.v are retained for configuration provenance, not compiled into the fixture."
+  ],
+  "include_dirs": [
+    "fpga/usrp3/lib/control",
+    "fpga/usrp3/lib/rfnoc/core",
+    "fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio"
+  ],
+  "source_files": [
+    "fpga/usrp3/lib/rfnoc/core/rfnoc_chdr_utils_pkg.sv",
+    "fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/radio_tx_core.v",
+    "fpga/usrp3/lib/rfnoc/core/ctrlport_endpoint.v",
+    "fpga/usrp3/lib/rfnoc/core/axis_ctrl_master.v",
+    "fpga/usrp3/lib/rfnoc/core/axis_ctrl_slave.sv",
+    "fpga/usrp3/lib/fifo/axi_fifo.v",
+    "fpga/usrp3/lib/fifo/axi_fifo_2clk.v",
+    "fpga/usrp3/lib/fifo/axi_fifo_flop.v",
+    "fpga/usrp3/lib/fifo/axi_fifo_flop2.v",
+    "fpga/usrp3/lib/fifo/axi_fifo_short.v",
+    "fpga/usrp3/lib/fifo/axi_fifo_bram.v",
+    "fpga/usrp3/lib/fifo/fifo_xpm_2clk.sv",
+    "fpga/usrp3/lib/control/synchronizer.v",
+    "fpga/usrp3/lib/control/synchronizer_impl.v",
+    "fpga/usrp3/lib/control/ram_2port.v",
+    "fpga/usrp3/lib/fifo/axi_mux.sv",
+    "fpga/usrp3/lib/fifo/axi_demux.v",
+    "fpga/usrp3/lib/fifo/axi_packet_gate.v"
+  ],
+  "files": [
+    {
+      "path": "LICENSE.md",
+      "sha256": "94cc36ada2641d037980bf6c2418a750ac10a115ae11de5a5cda6177769dbd4c"
+    },
+    {
+      "path": "fpga/usrp3/LICENSE.md",
+      "sha256": "206adc03412b6c5b71b9c9df9c1f2e60e11833e89393877d5031fd11d332b1d4"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/radio_tx_core.v",
+      "sha256": "cc9f88322611ec8f55385390e0877e852a3e752bea88a8892485ffc33470b321"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/rfnoc_block_radio_regs.vh",
+      "sha256": "63f49cee34e122dbd4e3be94cdeba2d969aaa23bc68fb2cbc9ad74130fc76d06"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/core/rfnoc_chdr_utils.vh",
+      "sha256": "8cab0338580f029542362e48915600705f78777e8a0fb721aa3c7472a30a1dc8"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/core/rfnoc_axis_ctrl_utils.vh",
+      "sha256": "729aff24a756c9e95ca511cdb683624d03242c63ef68396c688ec713f09269dc"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/core/rfnoc_chdr_utils_pkg.sv",
+      "sha256": "477de0206539b9aa18e0e3becff5a59260f12dd14336c6785d2a8b74b93209c9"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/core/ctrlport_endpoint.v",
+      "sha256": "38b009e9cd446b3f07a8a11650833d98e4672bc4bef570288445eb96ba6b9265"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/core/axis_ctrl_master.v",
+      "sha256": "76bf2a41f5d223c7855832b176505c317ddefb7c7fb47c8ad8ff546b00141e04"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/core/axis_ctrl_slave.sv",
+      "sha256": "80d1a4b81181cbbb1716db10e5888e9149c611f53358d95537508880bb616701"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_fifo.v",
+      "sha256": "084c439c27ac38eec692fb5900a4bf8ceb5175d5a05295a58bb1a06995f8e0a3"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_fifo_2clk.v",
+      "sha256": "71be86c80e22ec3f3ad22d301f4d47b6aa9ea2cfb889cad2c5ed6eac09b2a1a6"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_fifo_flop.v",
+      "sha256": "1917ce1b608f0fca49d7ed7a69b808ceb22a9392e8699bfc266d551804aef354"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_fifo_flop2.v",
+      "sha256": "137653cc4aaa04aa70e15dcfd393de32c5d8c9660a978c50c6f3d0339d3c62e1"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_fifo_short.v",
+      "sha256": "d45ec66a3ea3117daaae39db708c3a7e98bed5642f326f33f2528731f71cd526"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_fifo_bram.v",
+      "sha256": "be578dcdfefea280e1197911989f47bc92e9e79c9ba114e2d1f654c792c41c74"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/fifo_xpm_2clk.sv",
+      "sha256": "2138f8bd801ce7080b5c5469d4285d4eab8cea008f229afdf08e5320abdeb39e"
+    },
+    {
+      "path": "fpga/usrp3/lib/control/synchronizer.v",
+      "sha256": "ba5b87310067e138f25f2933758f6520cf9825e0e1ccdb2d71e94125f037b860"
+    },
+    {
+      "path": "fpga/usrp3/lib/control/synchronizer_impl.v",
+      "sha256": "b1ff99d480f0ca3f15b5bf8bec4a192acb377295f45efba2e2c0da065498df86"
+    },
+    {
+      "path": "fpga/usrp3/lib/control/ram_2port.v",
+      "sha256": "15989fab32eba3a98b71940b8eacd8d39b3498024da63ab8718064a988cbf062"
+    },
+    {
+      "path": "fpga/usrp3/lib/control/ram_2port_impl.vh",
+      "sha256": "ae6b452d2787ca23bb6be0b8e7e99abc8819265cff6c9a6b7bd5617e64b468db"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_mux.sv",
+      "sha256": "3922b916c485f0a74966623bc8816ae14fa57f1cffced71036b39eff83c613cd"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_demux.v",
+      "sha256": "72a7f2e2e7dc6d15a0a8feb92760eb3fcc6d1492009563c9609fba0d6be07bfd"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/noc_shell_radio.v",
+      "sha256": "add7d9b38234a261ab282e05d08a59fd274e69286a06b462cd29e0cf017b2fb9"
+    },
+    {
+      "path": "fpga/usrp3/lib/fifo/axi_packet_gate.v",
+      "sha256": "77307740ad75420a2baee89adbfa1a9b69b0f95e851fd385fd486b84015da5fe"
+    },
+    {
+      "path": "fpga/usrp3/lib/rfnoc/crossbar/torus_2d_dor_router_single_sw.v",
+      "sha256": "480fdb49d546d537d2fbbd38b8ef93a73f054eccc00953c31f5ea65ea7105edf"
+    }
+  ]
+}
