@@ -307,6 +307,8 @@ task automatic rfnoc_tests;
         if ($value$plusargs("RF_SCENARIO=%s", rf_scenario)) begin end
         check(rf_scenario=="sparse" || rf_scenario=="contended" || rf_scenario=="backpressure" ||
               rf_scenario=="overload" || rf_scenario=="lost_tail", "unknown RFNoC scenario");
+        check(EXTERNAL != 2 || rf_scenario != "lost_tail",
+              "rr_only has no post-gate fault containment contract; compare legal traffic only");
         check($value$plusargs("RF_TRACE=%s", rf_trace_path), "RF_TRACE is required");
         rf_log = $fopen(rf_trace_path,"w");
         check(rf_log != 0, "cannot open RF_TRACE");
@@ -337,6 +339,6 @@ task automatic rfnoc_tests;
         tests=tests+1;
         $display("RFNOC_PASS scenario=%s external=%0d generated=%0d source_accept=%0d source_drop=%0d completed=%0d ack=%0d faults=%0d phase_ps=%0d",
             rf_scenario,EXTERNAL,rf_generated,rf_fifo_accepted,rf_fifo_dropped,rf_completed,rf_acks,rf_faults,rf_phase_ps);
-        if (EXTERNAL && rf_scenario=="sparse" && rf_phase_ps==0) rf_baseline_diagnostic();
+        if (EXTERNAL == 1 && rf_scenario=="sparse" && rf_phase_ps==0) rf_baseline_diagnostic();
     end
 endtask

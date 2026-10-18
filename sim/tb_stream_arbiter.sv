@@ -80,7 +80,9 @@ module tb_stream_arbiter #(
         end
     endgenerate
 
-    localparam QSIZE = FIFO_DEPTH + (EXTERNAL ? 5 : 1);
+    // rr_only has at most one lane input plus two shared output slots for a
+    // single source. One extra scoreboard entry separates full from empty.
+    localparam QSIZE = RFNOC && EXTERNAL == 2 ? 4 : FIFO_DEPTH + (EXTERNAL ? 5 : 1);
     reg [DATA_WIDTH:0] queue_data [0:PORTS-1][0:QSIZE-1];
     reg [KEEP_WIDTH-1:0] queue_keep [0:PORTS-1][0:QSIZE-1];
     reg queue_good_end [0:PORTS-1][0:QSIZE-1];
@@ -349,7 +351,7 @@ module tb_stream_arbiter #(
                         // In the bounded baseline diagnostic, invalid accepted
                         // prefixes are excluded from the expected output list.
                         // This is interface accounting, not a FIFO pointer model.
-                        if (RFNOC && EXTERNAL && rf_diagnostic && input_frame_fault[i]) begin
+                        if (RFNOC && EXTERNAL == 1 && rf_diagnostic && input_frame_fault[i]) begin
                             rejected_prefix = was_frame_fault ? 1 : input_frame_beat[i]+1;
                             tail[i] = (tail[i]+QSIZE-rejected_prefix)%QSIZE;
                             queued[i] = queued[i]-rejected_prefix;
@@ -941,6 +943,7 @@ module tb_stream_arbiter #(
         check(mode == 0 || mode == 1, "MODE must be 0 or 1");
         check(PACKET_MODE == (test_case == "packet" || test_case == "rfnoc"), "PACKET_MODE and packet CASE must agree");
         check(RFNOC == (test_case == "rfnoc"), "RFNOC and rfnoc CASE must agree");
+        check(EXTERNAL != 2 || RFNOC, "rr_only is the RFNoC legal-traffic reference");
         if (EXTERNAL) check(mode == 1 && (test_case == "study" || RFNOC), "external reference is RR comparison only");
         if (test_case == "directed") directed();
         else if (test_case == "admission") admission();

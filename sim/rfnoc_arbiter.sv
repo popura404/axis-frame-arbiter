@@ -22,11 +22,42 @@ module rfnoc_arbiter #(
     output wire [PORTS-1:0] protocol_error
 );
     generate
-        if ((EXTERNAL != 0 && EXTERNAL != 1) ||
+        if ((EXTERNAL < 0 || EXTERNAL > 2) ||
             MAX_FRAME_BEATS < 1 || MAX_FRAME_BEATS > FIFO_DEPTH) begin : unsupported_configuration
             RFNOC_ARBITER_UNSUPPORTED_PARAMETERS invalid_configuration ();
         end
-        if (EXTERNAL) begin : external_candidate
+        if (EXTERNAL == 2) begin : rr_only_candidate
+            localparam integer SOURCE_WIDTH = $clog2(PORTS);
+            localparam integer KEEP_WIDTH = DATA_WIDTH / 8;
+            wire [PORTS*SOURCE_WIDTH-1:0] source_id;
+            wire [PORTS-1:0] input_ready;
+            wire output_valid;
+            // No second frame FIFO or length checker. The unchanged mux keeps
+            // one input slot per lane and two shared output/skid slots.
+            for (genvar lane = 0; lane < PORTS; lane = lane+1) begin : source_ids
+                localparam [SOURCE_WIDTH-1:0] SOURCE_ID = lane;
+                assign source_id[lane*SOURCE_WIDTH +: SOURCE_WIDTH] = SOURCE_ID;
+            end
+            assign s_ready = input_ready & {PORTS{!rst}};
+            assign m_valid = output_valid && !rst;
+            assign protocol_error = {PORTS{1'b0}};
+            axis_arb_mux #(
+                .S_COUNT(PORTS), .DATA_WIDTH(DATA_WIDTH),
+                .KEEP_ENABLE(0), .KEEP_WIDTH(KEEP_WIDTH), .LAST_ENABLE(1),
+                .ID_ENABLE(1), .S_ID_WIDTH(SOURCE_WIDTH), .M_ID_WIDTH(SOURCE_WIDTH),
+                .UPDATE_TID(0), .DEST_ENABLE(0), .DEST_WIDTH(1),
+                .USER_ENABLE(0), .USER_WIDTH(1),
+                .ARB_TYPE_ROUND_ROBIN(1), .ARB_LSB_HIGH_PRIORITY(1)
+            ) candidate (
+                .clk(clk), .rst(rst),
+                .s_axis_tdata(s_data), .s_axis_tkeep({PORTS*KEEP_WIDTH{1'b1}}),
+                .s_axis_tvalid(s_valid & {PORTS{!rst}}), .s_axis_tready(input_ready), .s_axis_tlast(s_last),
+                .s_axis_tid(source_id), .s_axis_tdest({PORTS{1'b0}}), .s_axis_tuser({PORTS{1'b0}}),
+                .m_axis_tdata(m_data), .m_axis_tkeep(), .m_axis_tvalid(output_valid),
+                .m_axis_tready(m_ready && !rst), .m_axis_tlast(m_last),
+                .m_axis_tid(m_source), .m_axis_tdest(), .m_axis_tuser()
+            );
+        end else if (EXTERNAL == 1) begin : external_candidate
             axis_external #(
                 .PORTS(PORTS), .DATA_WIDTH(DATA_WIDTH), .FIFO_DEPTH(FIFO_DEPTH),
                 .FRAME_FIFO(1), .FRAME_LIMIT(MAX_FRAME_BEATS)
