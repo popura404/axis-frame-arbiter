@@ -1,0 +1,50 @@
+fpga_stream_arbiter
+Copyright (C) 2026 Yijie Yang and contributors
+
+Original project material
+-------------------------
+Unless a file explicitly states otherwise, original material distributed
+in this repository is licensed under the GNU General Public License,
+version 3 only (SPDX-License-Identifier: GPL-3.0-only).
+
+This grant covers the original RTL, simulation and formal verification
+sources, Python and Tcl scripts, constraints, configuration files, README
+and repository documentation. It does not replace third-party notices or
+grant rights in third-party material.
+
+You may redistribute and modify this material under the terms of GPLv3.
+It is provided WITHOUT ANY WARRANTY, including the implied warranties of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See LICENSE for
+the complete terms and https://www.gnu.org/licenses/gpl-3.0.html.
+
+Third-party dependencies
+------------------------
+1. verilog-axis
+   Source: https://github.com/alexforencich/verilog-axis
+   Revision: 48ff7a7e2ef782cf778d47910cf85835c64b1bce
+   License: MIT; retain upstream copyright notices and COPYING.
+   The exact files and checksums are recorded in scripts/external_axis.json.
+
+2. Ettus Research UHD / USRP3 FPGA sources
+   Source: https://github.com/EttusResearch/uhd
+   Revision: d1be63490e3f3df22ff2f4ea1315f9aada468562
+   The selected HDL and header files carry LGPL-3.0-or-later notices.
+   Preserve their notices, upstream LICENSE.md and fpga/usrp3/LICENSE.md;
+   other upstream components may have different licenses or exceptions.
+   The exact files and checksums are recorded in scripts/external_uhd.json.
+
+These external sources are fetched separately into the ignored build/vendor
+directory. Their original licensing and attribution remain applicable.
+Distribution of a combined work must satisfy all applicable license terms.
+
+3. AMD Vivado, XPM and unisim
+   These tools and models are supplied by the user's Vivado installation
+   under AMD's terms. They are not included in this repository and are not
+   relicensed by this project. This notice grants no additional rights to
+   redistribute proprietary tools, models or components.
+
+Material outside this repository
+-------------------------------
+The sibling manuscript, figures, research data and work logs are outside
+this repository's licensing scope and retain their respective statements.
+This engineering license is separate from any article publication license.
